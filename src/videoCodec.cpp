@@ -12,13 +12,16 @@ int video_stream_index = -1;
 bool packet_dumping = false;
 
 // 处理画面录制（数码变焦/对比度之后）
-static AVCodecContext *rec_enc_ctx = NULL;
-static struct SwsContext *rec_sws = NULL;
-static AVFrame *rec_frame = NULL;
-static AVPacket *rec_pkt = NULL;
+#include "utils/tiny_jpeg.h"
 static FILE *rec_file = NULL;
+static uint8_t rec_rgba[320 * 240 * 4];
 static bool processed_recording = false;
-static int64_t rec_pts = 0;
+
+static void rec_write_cb(void *context, void *data, int size)
+{
+    if (context != NULL && data != NULL && size > 0)
+        fwrite(data, 1, size, (FILE *)context);
+}
 
 int openInputStream(const char *input_url)
 {
@@ -198,43 +201,16 @@ void codec_enablePacketDumping(bool en, const char *dump_target)
 
 bool codec_startProcessedRecording(const char *filename, int width, int height)
 {
+    (void)width;
+    (void)height;
     if (processed_recording)
         codec_stopProcessedRecording();
-
-    AVCodec *codec = avcodec_find_encoder(AV_CODEC_ID_MJPEG);
-    if (codec == NULL)
-        return false;
-
-    rec_enc_ctx = avcodec_alloc_context3(codec);
-    rec_enc_ctx->bit_rate = 20000000;
-    rec_enc_ctx->width = width;
-    rec_enc_ctx->height = height;
-    rec_enc_ctx->time_base = (AVRational){1, 25};
-    rec_enc_ctx->framerate = (AVRational){25, 1};
-    rec_enc_ctx->pix_fmt = AV_PIX_FMT_YUVJ420P;
-    if (avcodec_open2(rec_enc_ctx, codec, NULL) < 0)
-        return false;
-
-    rec_frame = av_frame_alloc();
-    rec_frame->format = rec_enc_ctx->pix_fmt;
-    rec_frame->width = width;
-    rec_frame->height = height;
-    if (av_frame_get_buffer(rec_frame, 0) < 0)
-        return false;
-
-    rec_sws = sws_getContext(width, height, AV_PIX_FMT_BGRA,
-                             width, height, AV_PIX_FMT_YUVJ420P,
-                             SWS_POINT, NULL, NULL, NULL);
-    if (rec_sws == NULL)
-        return false;
 
     rec_file = fopen(filename, "wb");
     if (rec_file == NULL)
         return false;
 
-    rec_pkt = av_packet_alloc();
     processed_recording = true;
-    rec_pts = 0;
     return true;
 }
 
@@ -243,23 +219,16 @@ void codec_writeProcessedFrame(const uint8_t *bgra)
     if (!processed_recording)
         return;
 
-    const uint8_t *src_data[1] = {bgra};
-    int src_linesize[1] = {rec_enc_ctx->width * 4};
-    sws_scale(rec_sws, src_data, src_linesize, 0, rec_enc_ctx->height,
-              rec_frame->data, rec_frame->linesize);
-
-    rec_frame->pts = rec_pts++;
-    int ret = avcodec_send_frame(rec_enc_ctx, rec_frame);
-    while (ret >= 0)
+    // BGRA -> RGBA（tiny_jpeg 只支持 RGB/RGBA 顺序）
+    for (int i = 0; i < 320 * 240; i++)
     {
-        ret = avcodec_receive_packet(rec_enc_ctx, rec_pkt);
-        if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
-            break;
-        if (ret < 0)
-            break;
-        fwrite(rec_pkt->data, 1, rec_pkt->size, rec_file);
-        av_packet_unref(rec_pkt);
+        rec_rgba[i * 4 + 0] = bgra[i * 4 + 2];
+        rec_rgba[i * 4 + 1] = bgra[i * 4 + 1];
+        rec_rgba[i * 4 + 2] = bgra[i * 4 + 0];
+        rec_rgba[i * 4 + 3] = bgra[i * 4 + 3];
     }
+
+    tje_encode_with_func(rec_write_cb, rec_file, 75, 320, 240, 4, rec_rgba);
 }
 
 void codec_stopProcessedRecording()
@@ -267,25 +236,8 @@ void codec_stopProcessedRecording()
     if (!processed_recording)
         return;
 
-    avcodec_send_frame(rec_enc_ctx, NULL);
-    while (avcodec_receive_packet(rec_enc_ctx, rec_pkt) == 0)
-    {
-        fwrite(rec_pkt->data, 1, rec_pkt->size, rec_file);
-        av_packet_unref(rec_pkt);
-    }
-
     fclose(rec_file);
     rec_file = NULL;
-
-    avcodec_free_context(&rec_enc_ctx);
-    rec_enc_ctx = NULL;
-    sws_freeContext(rec_sws);
-    rec_sws = NULL;
-    av_frame_free(&rec_frame);
-    rec_frame = NULL;
-    av_packet_free(&rec_pkt);
-    rec_pkt = NULL;
-
     processed_recording = false;
 }
 
