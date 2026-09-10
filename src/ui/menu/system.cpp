@@ -12,7 +12,7 @@ static lv_obj_t *ui_Checkbox7;
 bool system_crosshair_option_focused()
 {
     return (ui_Checkbox7 != NULL && lv_obj_is_valid(ui_Checkbox7) &&
-            lv_group_get_focused() == ui_Checkbox7);
+            lv_group_get_focused(lv_group_get_default()) == ui_Checkbox7);
 }
 static lv_obj_t *ui_SliderBrightness;
 static lv_obj_t *ui_LabelBrightnessVal;
