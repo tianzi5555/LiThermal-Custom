@@ -15,7 +15,7 @@ bool packet_dumping = false;
 #include "utils/tiny_jpeg.h"
 #include <vector>
 #include <stdarg.h>
-#include <mutex>
+#include <pthread.h>
 static AVFormatContext *rec_ctx = NULL;
 static AVStream *rec_stream = NULL;
 static AVPacket *rec_pkt = NULL;
@@ -24,7 +24,14 @@ static uint8_t rec_rgba[320 * 240 * 4];
 static bool processed_recording = false;
 static int64_t rec_pts = 0;
 static int rec_write_count = 0;
-static std::mutex rec_mutex; // 保护录像状态，防止视频线程写帧与 UI 线程启停冲突
+
+// 编码在独立线程中进行：视频线程只拷贝最新一帧并通知，编码忙时直接丢帧，
+// 避免 tiny_jpeg 编码阻塞视频解码/显示造成画面延迟。
+static pthread_t rec_thread;
+static pthread_mutex_t rec_frame_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t rec_frame_cond = PTHREAD_COND_INITIALIZER;
+static bool rec_thread_running = false;
+static bool rec_frame_pending = false;
 
 static void rec_log(const char *fmt, ...)
 {
@@ -225,36 +232,65 @@ void codec_enablePacketDumping(bool en, const char *dump_target)
     }
 }
 
-// 调用前必须已持有 rec_mutex
-static void codec_stopProcessedRecording_locked()
+// 编码线程：只负责把 rec_rgba 编码成 JPEG 并写入 muxer。
+// 注意：只有本线程会写 rec_ctx/rec_pkt/rec_jpeg_buf，start/stop 只在线程未运行时初始化/销毁它们。
+static void *rec_thread_func(void *)
 {
-    if (!processed_recording)
-        return;
+    for (;;)
+    {
+        pthread_mutex_lock(&rec_frame_mutex);
+        while (!rec_frame_pending && rec_thread_running)
+            pthread_cond_wait(&rec_frame_cond, &rec_frame_mutex);
+        if (!rec_thread_running)
+        {
+            pthread_mutex_unlock(&rec_frame_mutex);
+            break;
+        }
+        // pending 为 true，视频线程不会覆盖 rec_rgba，可以解锁后慢慢编码
+        pthread_mutex_unlock(&rec_frame_mutex);
 
-    rec_log("stop: frames=%d pts=%lld\n", rec_write_count, (long long)rec_pts);
-    int ret = av_write_trailer(rec_ctx);
-    rec_log("stop: write_trailer ret=%d\n", ret);
-    if (!(rec_ctx->oformat->flags & AVFMT_NOFILE))
-        avio_closep(&rec_ctx->pb);
-    avformat_free_context(rec_ctx);
-    rec_ctx = NULL;
-    rec_stream = NULL;
+        rec_jpeg_buf.clear();
+        if (tje_encode_with_func(rec_write_cb, &rec_jpeg_buf, 3, 320, 240, 4, rec_rgba) == 0)
+        {
+            rec_log("write: tiny_jpeg encode failed\n");
+            fprintf(stderr, "processed recording: tiny_jpeg encode failed\n");
+        }
+        else if (!rec_jpeg_buf.empty())
+        {
+            av_packet_unref(rec_pkt);
+            if (av_new_packet(rec_pkt, (int)rec_jpeg_buf.size()) == 0)
+            {
+                memcpy(rec_pkt->data, rec_jpeg_buf.data(), rec_jpeg_buf.size());
+                rec_pkt->stream_index = rec_stream->index;
+                rec_pkt->pts = rec_pts++;
+                rec_pkt->dts = rec_pkt->pts;
+                av_packet_rescale_ts(rec_pkt, rec_stream->time_base, rec_stream->time_base);
+                int ret = av_interleaved_write_frame(rec_ctx, rec_pkt);
+                if (rec_write_count < 5 || ret < 0)
+                    rec_log("write: count=%d size=%d ret=%d\n", rec_write_count, (int)rec_jpeg_buf.size(), ret);
+                rec_write_count++;
+            }
+            else
+            {
+                rec_log("write: av_new_packet failed size=%d\n", (int)rec_jpeg_buf.size());
+            }
+        }
 
-    av_packet_free(&rec_pkt);
-    rec_pkt = NULL;
-
-    processed_recording = false;
-    rec_log("stop: done\n");
+        pthread_mutex_lock(&rec_frame_mutex);
+        rec_frame_pending = false;
+        pthread_cond_broadcast(&rec_frame_cond);
+        pthread_mutex_unlock(&rec_frame_mutex);
+    }
+    return NULL;
 }
 
 bool codec_startProcessedRecording(const char *filename, int width, int height)
 {
     (void)width;
     (void)height;
-    std::lock_guard<std::mutex> lock(rec_mutex);
     rec_log("start: %s\n", filename);
     if (processed_recording)
-        codec_stopProcessedRecording_locked();
+        codec_stopProcessedRecording();
 
     int ret = avformat_alloc_output_context2(&rec_ctx, NULL, NULL, filename);
     if (ret < 0)
@@ -302,18 +338,55 @@ bool codec_startProcessedRecording(const char *filename, int width, int height)
     }
 
     rec_pkt = av_packet_alloc();
+    if (rec_pkt == NULL)
+    {
+        rec_log("start: av_packet_alloc failed\n");
+        if (!(rec_ctx->oformat->flags & AVFMT_NOFILE))
+            avio_closep(&rec_ctx->pb);
+        avformat_free_context(rec_ctx);
+        rec_ctx = NULL;
+        rec_stream = NULL;
+        return false;
+    }
     rec_pts = 0;
     rec_write_count = 0;
+
+    pthread_mutex_lock(&rec_frame_mutex);
+    rec_frame_pending = false;
+    rec_thread_running = true;
     processed_recording = true;
+    pthread_mutex_unlock(&rec_frame_mutex);
+
+    if (pthread_create(&rec_thread, NULL, rec_thread_func, NULL) != 0)
+    {
+        rec_log("start: pthread_create failed\n");
+        pthread_mutex_lock(&rec_frame_mutex);
+        processed_recording = false;
+        rec_thread_running = false;
+        pthread_mutex_unlock(&rec_frame_mutex);
+        if (!(rec_ctx->oformat->flags & AVFMT_NOFILE))
+            avio_closep(&rec_ctx->pb);
+        avformat_free_context(rec_ctx);
+        rec_ctx = NULL;
+        rec_stream = NULL;
+        av_packet_free(&rec_pkt);
+        rec_pkt = NULL;
+        return false;
+    }
+
     rec_log("start: ok\n");
     return true;
 }
 
 void codec_writeProcessedFrame(const uint8_t *bgra)
 {
-    std::lock_guard<std::mutex> lock(rec_mutex);
-    if (!processed_recording)
+    pthread_mutex_lock(&rec_frame_mutex);
+    if (!processed_recording || rec_frame_pending)
+    {
+        // 编码线程还在处理上一帧，直接丢这一帧，保证视频显示不等待
+        pthread_mutex_unlock(&rec_frame_mutex);
         return;
+    }
 
     // BGRA -> RGBA（tiny_jpeg 只支持 RGB/RGBA 顺序）
     for (int i = 0; i < 320 * 240; i++)
@@ -324,40 +397,39 @@ void codec_writeProcessedFrame(const uint8_t *bgra)
         rec_rgba[i * 4 + 3] = bgra[i * 4 + 3];
     }
 
-    rec_jpeg_buf.clear();
-    if (tje_encode_with_func(rec_write_cb, &rec_jpeg_buf, 3, 320, 240, 4, rec_rgba) == 0)
-    {
-        rec_log("write: tiny_jpeg encode failed\n");
-        fprintf(stderr, "processed recording: tiny_jpeg encode failed\n");
-        return;
-    }
-    if (rec_jpeg_buf.empty())
-    {
-        rec_log("write: empty jpeg\n");
-        return;
-    }
-
-    av_packet_unref(rec_pkt);
-    if (av_new_packet(rec_pkt, (int)rec_jpeg_buf.size()) < 0)
-    {
-        rec_log("write: av_new_packet failed size=%d\n", (int)rec_jpeg_buf.size());
-        return;
-    }
-    memcpy(rec_pkt->data, rec_jpeg_buf.data(), rec_jpeg_buf.size());
-    rec_pkt->stream_index = rec_stream->index;
-    rec_pkt->pts = rec_pts++;
-    rec_pkt->dts = rec_pkt->pts;
-    av_packet_rescale_ts(rec_pkt, rec_stream->time_base, rec_stream->time_base);
-    int ret = av_interleaved_write_frame(rec_ctx, rec_pkt);
-    if (rec_write_count < 5 || ret < 0)
-        rec_log("write: count=%d size=%d ret=%d\n", rec_write_count, (int)rec_jpeg_buf.size(), ret);
-    rec_write_count++;
+    rec_frame_pending = true;
+    pthread_cond_signal(&rec_frame_cond);
+    pthread_mutex_unlock(&rec_frame_mutex);
 }
 
 void codec_stopProcessedRecording()
 {
-    std::lock_guard<std::mutex> lock(rec_mutex);
-    codec_stopProcessedRecording_locked();
+    pthread_mutex_lock(&rec_frame_mutex);
+    if (!processed_recording)
+    {
+        pthread_mutex_unlock(&rec_frame_mutex);
+        return;
+    }
+    processed_recording = false;
+    rec_thread_running = false;
+    pthread_cond_broadcast(&rec_frame_cond);
+    pthread_mutex_unlock(&rec_frame_mutex);
+
+    pthread_join(rec_thread, NULL);
+
+    rec_log("stop: frames=%d pts=%lld\n", rec_write_count, (long long)rec_pts);
+    int ret = av_write_trailer(rec_ctx);
+    rec_log("stop: write_trailer ret=%d\n", ret);
+    if (!(rec_ctx->oformat->flags & AVFMT_NOFILE))
+        avio_closep(&rec_ctx->pb);
+    avformat_free_context(rec_ctx);
+    rec_ctx = NULL;
+    rec_stream = NULL;
+
+    av_packet_free(&rec_pkt);
+    rec_pkt = NULL;
+
+    rec_log("stop: done\n");
 }
 
 AVFrame *codec_getFrame()
