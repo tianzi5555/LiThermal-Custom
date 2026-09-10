@@ -32,3 +32,10 @@ void codec_enablePacketDumping(bool en, const char *dump_target);
  * @note 该函数会阻塞直到获取到一帧解码后的图像
  */
 AVFrame *codec_getFrame();
+
+/**
+ * @brief 录制处理后的画面（数码变焦/对比度之后）为 MJPEG 文件
+ */
+bool codec_startProcessedRecording(const char *filename, int width, int height);
+void codec_writeProcessedFrame(const uint8_t *bgra);
+void codec_stopProcessedRecording();

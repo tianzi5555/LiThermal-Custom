@@ -420,6 +420,7 @@ void *thread_refresh_image(void *)
             }
             err_count = 0;
             process_frame_to_buffers(frame);
+            codec_writeProcessedFrame(IR_frame_buffer);
             av_frame_free(&frame);
             LOCKLV();
             if (lv_obj_is_valid(videoPlayer.img_obj))

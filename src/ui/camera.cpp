@@ -39,6 +39,7 @@ void camera_take_photo_from_stream()
 }
 #include "lottie_rec.h"
 extern bool packet_dumping;
+static bool recording_processed = false;
 lv_timer_t *tm_create_circle = NULL, *tm_circle = NULL;
 lv_obj_t *circle_REC = NULL;
 lv_obj_t *lot_rec = NULL;
@@ -46,7 +47,7 @@ void camera_record_toggle_dump_stream()
 {
     if (cameraUtils.connected == false)
         return;
-    if (packet_dumping == true)
+    if (recording_processed == true)
     {
         flash_bang_effect();
         LOCKLV();
@@ -71,7 +72,8 @@ void camera_record_toggle_dump_stream()
             lot_rec = NULL;
         }
         UNLOCKLV();
-        codec_enablePacketDumping(false, NULL);
+        codec_stopProcessedRecording();
+        recording_processed = false;
     }
     else
     {
@@ -84,7 +86,12 @@ void camera_record_toggle_dump_stream()
         }
         cameraUtils.readJpegWithExtra(name_partial);
         sprintf(file_name_buffer, "%s.mjpeg", name_partial);
-        codec_enablePacketDumping(true, file_name_buffer);
+        if (!codec_startProcessedRecording(file_name_buffer, 320, 240))
+        {
+            printf("Failed to start processed recording\n");
+            return;
+        }
+        recording_processed = true;
         sprintf(file_name_buffer, "%s.raw", name_partial);
         remove(file_name_buffer); // 避免识别成照片
         lot_rec = lv_rlottie_create_from_raw(lv_layer_top(), 200, 200, lottie_rec);

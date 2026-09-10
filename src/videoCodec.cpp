@@ -11,6 +11,16 @@ AVFrame *frame = NULL;
 int video_stream_index = -1;
 bool packet_dumping = false;
 
+// 处理画面录制（数码变焦/对比度之后）
+static AVCodecContext *rec_enc_ctx = NULL;
+static AVFormatContext *rec_ctx = NULL;
+static AVStream *rec_stream = NULL;
+static struct SwsContext *rec_sws = NULL;
+static AVFrame *rec_frame = NULL;
+static AVPacket *rec_pkt = NULL;
+static bool processed_recording = false;
+static int64_t rec_pts = 0;
+
 int openInputStream(const char *input_url)
 {
     if (avformat_open_input(&input_ctx, input_url, NULL, NULL) < 0)
@@ -185,6 +195,116 @@ void codec_enablePacketDumping(bool en, const char *dump_target)
             }
         }
     }
+}
+
+bool codec_startProcessedRecording(const char *filename, int width, int height)
+{
+    if (processed_recording)
+        codec_stopProcessedRecording();
+
+    AVCodec *codec = avcodec_find_encoder(AV_CODEC_ID_MJPEG);
+    if (codec == NULL)
+        return false;
+
+    rec_enc_ctx = avcodec_alloc_context3(codec);
+    rec_enc_ctx->bit_rate = 20000000;
+    rec_enc_ctx->width = width;
+    rec_enc_ctx->height = height;
+    rec_enc_ctx->time_base = (AVRational){1, 25};
+    rec_enc_ctx->framerate = (AVRational){25, 1};
+    rec_enc_ctx->pix_fmt = AV_PIX_FMT_YUVJ420P;
+    if (avcodec_open2(rec_enc_ctx, codec, NULL) < 0)
+        return false;
+
+    rec_frame = av_frame_alloc();
+    rec_frame->format = rec_enc_ctx->pix_fmt;
+    rec_frame->width = width;
+    rec_frame->height = height;
+    if (av_frame_get_buffer(rec_frame, 0) < 0)
+        return false;
+
+    rec_sws = sws_getContext(width, height, AV_PIX_FMT_BGRA,
+                             width, height, AV_PIX_FMT_YUVJ420P,
+                             SWS_POINT, NULL, NULL, NULL);
+    if (rec_sws == NULL)
+        return false;
+
+    if (avformat_alloc_output_context2(&rec_ctx, NULL, NULL, filename) < 0)
+        return false;
+    rec_stream = avformat_new_stream(rec_ctx, NULL);
+    if (rec_stream == NULL)
+        return false;
+    avcodec_parameters_from_context(rec_stream->codecpar, rec_enc_ctx);
+    rec_stream->time_base = rec_enc_ctx->time_base;
+
+    if (!(rec_ctx->oformat->flags & AVFMT_NOFILE))
+    {
+        if (avio_open(&rec_ctx->pb, filename, AVIO_FLAG_WRITE) < 0)
+            return false;
+    }
+    if (avformat_write_header(rec_ctx, NULL) < 0)
+        return false;
+
+    rec_pkt = av_packet_alloc();
+    processed_recording = true;
+    rec_pts = 0;
+    return true;
+}
+
+void codec_writeProcessedFrame(const uint8_t *bgra)
+{
+    if (!processed_recording)
+        return;
+
+    const uint8_t *src_data[1] = {bgra};
+    int src_linesize[1] = {rec_enc_ctx->width * 4};
+    sws_scale(rec_sws, src_data, src_linesize, 0, rec_enc_ctx->height,
+              rec_frame->data, rec_frame->linesize);
+
+    rec_frame->pts = rec_pts++;
+    int ret = avcodec_send_frame(rec_enc_ctx, rec_frame);
+    while (ret >= 0)
+    {
+        ret = avcodec_receive_packet(rec_enc_ctx, rec_pkt);
+        if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
+            break;
+        if (ret < 0)
+            break;
+        rec_pkt->stream_index = rec_stream->index;
+        av_packet_rescale_ts(rec_pkt, rec_enc_ctx->time_base, rec_stream->time_base);
+        av_interleaved_write_frame(rec_ctx, rec_pkt);
+    }
+}
+
+void codec_stopProcessedRecording()
+{
+    if (!processed_recording)
+        return;
+
+    avcodec_send_frame(rec_enc_ctx, NULL);
+    while (avcodec_receive_packet(rec_enc_ctx, rec_pkt) == 0)
+    {
+        rec_pkt->stream_index = rec_stream->index;
+        av_packet_rescale_ts(rec_pkt, rec_enc_ctx->time_base, rec_stream->time_base);
+        av_interleaved_write_frame(rec_ctx, rec_pkt);
+    }
+
+    av_write_trailer(rec_ctx);
+    if (!(rec_ctx->oformat->flags & AVFMT_NOFILE))
+        avio_closep(&rec_ctx->pb);
+    avformat_free_context(rec_ctx);
+    rec_ctx = NULL;
+
+    avcodec_free_context(&rec_enc_ctx);
+    rec_enc_ctx = NULL;
+    sws_freeContext(rec_sws);
+    rec_sws = NULL;
+    av_frame_free(&rec_frame);
+    rec_frame = NULL;
+    av_packet_free(&rec_pkt);
+    rec_pkt = NULL;
+
+    processed_recording = false;
 }
 
 AVFrame *codec_getFrame()
