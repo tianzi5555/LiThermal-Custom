@@ -22,6 +22,28 @@ typedef struct settingsStorage_legacy_t
     uint32_t __tail;
 } settingsStorage_legacy_t;
 
+// 上一版：有数码变焦/对比度，但还没有准星样式设置
+typedef struct settingsStorage_v2_t
+{
+    uint32_t __head;
+    uint32_t brightness;
+    uint32_t colorPalette;
+    uint32_t enableGraph;
+    uint32_t graphPos;
+    uint32_t graphSize;
+    uint32_t graphRefreshInterval;
+    uint32_t enableMaxValueDisplay;
+    uint32_t enableMinValueDisplay;
+    uint32_t enableCenterValueDisplay;
+    uint32_t preserveUI;
+    uint32_t useBlackFlashBang;
+    uint32_t use4117Cursors;
+    uint32_t digitalZoom;
+    uint32_t autoContrast;
+    uint32_t contrast;
+    uint32_t __tail;
+} settingsStorage_v2_t;
+
 settingsStorage_t globalSettings;
 
 void settings_default()
@@ -42,6 +64,9 @@ void settings_default()
     globalSettings.digitalZoom = 100;
     globalSettings.autoContrast = true;
     globalSettings.contrast = 50;
+    globalSettings.crosshairColor = 0;
+    globalSettings.crosshairLength = 20;
+    globalSettings.crosshairThickness = 2;
     globalSettings.__tail = SETTINGS_TAIL;
 }
 
@@ -66,6 +91,24 @@ void settings_load()
     {
         fread(&globalSettings, sizeof(globalSettings), 1, fp);
     }
+    else if (file_size == (long)sizeof(settingsStorage_v2_t))
+    {
+        settingsStorage_v2_t v2;
+        memset(&v2, 0, sizeof(v2));
+        fread(&v2, sizeof(v2), 1, fp);
+        memcpy(&globalSettings, &v2, sizeof(v2));
+        globalSettings.crosshairColor = 0;
+        globalSettings.crosshairLength = 20;
+        globalSettings.crosshairThickness = 2;
+        globalSettings.__tail = SETTINGS_TAIL;
+        if (globalSettings.__head == SETTINGS_HEAD && v2.__tail == SETTINGS_TAIL)
+        {
+            printf("[Info] Migrated v2 settings\n");
+            fclose(fp);
+            settings_save();
+            return;
+        }
+    }
     else if (file_size == (long)sizeof(settingsStorage_legacy_t))
     {
         // 旧版配置文件：先读旧字段，再补新字段默认值
@@ -76,6 +119,9 @@ void settings_load()
         globalSettings.digitalZoom = 100;
         globalSettings.autoContrast = true;
         globalSettings.contrast = 50;
+        globalSettings.crosshairColor = 0;
+        globalSettings.crosshairLength = 20;
+        globalSettings.crosshairThickness = 2;
         globalSettings.__tail = SETTINGS_TAIL;
         if (globalSettings.__head == SETTINGS_HEAD && legacy.__tail == SETTINGS_TAIL)
         {
@@ -105,6 +151,16 @@ void settings_load()
             globalSettings.autoContrast = 1;
         if (globalSettings.contrast > 100)
             globalSettings.contrast = 50;
+        if (globalSettings.crosshairColor > 4)
+            globalSettings.crosshairColor = 0;
+        if (globalSettings.crosshairLength < 6)
+            globalSettings.crosshairLength = 6;
+        if (globalSettings.crosshairLength > 60)
+            globalSettings.crosshairLength = 60;
+        if (globalSettings.crosshairThickness < 1)
+            globalSettings.crosshairThickness = 1;
+        if (globalSettings.crosshairThickness > 10)
+            globalSettings.crosshairThickness = 10;
     }
 }
 

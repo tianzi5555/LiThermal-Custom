@@ -64,6 +64,12 @@ void digitalZoom_step(int direction);
 // 数码变焦右下角鸟览图
 void ui_zoom_pip_check_visibility();
 
+// 准星样式设置页
+void crosshair_settings_show();
+void crosshair_settings_hide();
+bool crosshair_settings_is_open();
+bool system_crosshair_option_focused();
+
 /// @brief 相册事件检查
 /// @param has_hal_go_back_event 如果为true，代表返回（菜单）按键按下
 void menu_gallery_loop(bool has_hal_go_back_event);
@@ -81,3 +87,4 @@ void ui_crosshairs_updateVisibility();
 void ui_center_display_create();
 void ui_center_display_update();
 void ui_center_display_updateVisibility();
+void ui_center_display_updateStyle();

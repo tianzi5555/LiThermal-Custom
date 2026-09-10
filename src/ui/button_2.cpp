@@ -157,6 +157,17 @@ void menu_system_hide();
 
 void refresh_menu_key()
 {
+    if (crosshair_settings_is_open())
+    {
+        if (HAL::key_press_event[1] == true)
+        {
+            HAL::key_press_event[1] = false;
+            LOCKLV();
+            crosshair_settings_hide();
+            UNLOCKLV();
+        }
+        return;
+    }
     if (expanded == false)
     {
         if (HAL::key_press_event[1] == true)

@@ -183,6 +183,20 @@ void ui_crosshairs_create()
 static lv_obj_t *center_cross_obj = NULL;      // 绿色圆形准星容器
 static lv_obj_t *center_pure_cross_obj = NULL; // 纯十字准星容器
 static lv_obj_t *center_label = NULL;
+static lv_obj_t *bar_h = NULL;
+static lv_obj_t *bar_v = NULL;
+
+static lv_color_t crosshair_color_from_setting()
+{
+    switch (globalSettings.crosshairColor)
+    {
+    case 1: return lv_color_hex(0x00FF00); // 绿
+    case 2: return lv_color_hex(0xFF0000); // 红
+    case 3: return lv_color_hex(0xFFFF00); // 黄
+    case 4: return lv_color_hex(0x0080FF); // 蓝
+    default: return lv_color_hex(0xFFFFFF); // 白
+    }
+}
 
 static void ui_center_display_updateVisibility();
 
@@ -203,27 +217,27 @@ void ui_center_display_create()
     lv_img_set_src(img, &crosshairs);
 
     center_pure_cross_obj = lv_obj_create(lv_scr_act());
-    lv_obj_set_size(center_pure_cross_obj, 20, 20);
+    lv_obj_set_size(center_pure_cross_obj, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
     lv_obj_set_style_pad_all(center_pure_cross_obj, 0, 0);
     lv_obj_set_style_bg_opa(center_pure_cross_obj, 0, 0);
     lv_obj_set_style_border_width(center_pure_cross_obj, 0, 0);
     lv_obj_set_style_radius(center_pure_cross_obj, 0, 0);
     lv_obj_clear_flag(center_pure_cross_obj, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_center(center_pure_cross_obj);
-    lv_obj_t *bar_h = lv_obj_create(center_pure_cross_obj);
-    lv_obj_set_size(bar_h, 20, 2);
-    lv_obj_center(bar_h);
+
+    bar_h = lv_obj_create(center_pure_cross_obj);
     lv_obj_set_style_bg_color(bar_h, lv_color_white(), 0);
     lv_obj_set_style_bg_opa(bar_h, LV_OPA_70, 0);
     lv_obj_set_style_border_width(bar_h, 0, 0);
     lv_obj_set_style_radius(bar_h, 0, 0);
-    lv_obj_t *bar_v = lv_obj_create(center_pure_cross_obj);
-    lv_obj_set_size(bar_v, 2, 20);
-    lv_obj_center(bar_v);
+
+    bar_v = lv_obj_create(center_pure_cross_obj);
     lv_obj_set_style_bg_color(bar_v, lv_color_white(), 0);
     lv_obj_set_style_bg_opa(bar_v, LV_OPA_70, 0);
     lv_obj_set_style_border_width(bar_v, 0, 0);
     lv_obj_set_style_radius(bar_v, 0, 0);
+
+    ui_center_display_updateStyle();
 
     center_label = lv_label_create(lv_scr_act());
     lv_obj_set_style_bg_color(center_label, lv_color_black(), 0);
@@ -244,6 +258,28 @@ void ui_center_display_update()
         sprintf(buf, "中心 %.1f", cameraUtils.lastCenterTemperature);
         lv_label_set_text(center_label, buf);
     }
+}
+
+void ui_center_display_updateStyle()
+{
+    if (bar_h == NULL || bar_v == NULL)
+        return;
+
+    lv_color_t c = crosshair_color_from_setting();
+    lv_obj_set_style_bg_color(bar_h, c, 0);
+    lv_obj_set_style_bg_color(bar_v, c, 0);
+
+    int len = (int)globalSettings.crosshairLength;
+    int thick = (int)globalSettings.crosshairThickness;
+    if (len < 6) len = 6;
+    if (len > 60) len = 60;
+    if (thick < 1) thick = 1;
+    if (thick > 10) thick = 10;
+
+    lv_obj_set_size(bar_h, len, thick);
+    lv_obj_set_size(bar_v, thick, len);
+    lv_obj_center(bar_h);
+    lv_obj_center(bar_v);
 }
 
 static void ui_center_display_updateVisibility()

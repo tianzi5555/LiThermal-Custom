@@ -193,8 +193,21 @@ void *thread_hal_func(void *)
         }
         else // 清零提取出的编码器变化值
         {
+            if (current_mode == MODE_SYSTEM_SETTINGS && HAL::key_press_event[2])
+            {
+                HAL::key_press_event[2] = false;
+                if (system_crosshair_option_focused())
+                {
+                    LOCKLV();
+                    crosshair_settings_show();
+                    UNLOCKLV();
+                }
+            }
+            else
+            {
+                HAL::key_press_event[2] = false;
+            }
             last_encoder_direction = 0;
-            HAL::key_press_event[2] = false;
             HAL::key_press_event[3] = false;
         }
         refresh_menu_key();
