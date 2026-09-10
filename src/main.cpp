@@ -42,7 +42,6 @@ void *thread_app_func(void *)
     return NULL;
 }
 pthread_t thread_ui;
-pthread_t thread_ui;
 pthread_t thread_center_temp;
 void *thread_ui_func(void *)
 {
