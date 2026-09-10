@@ -9,7 +9,7 @@ if [ -d "$ROOTPATH/LiThermal" ]; then
     rm -rf "$ROOTPATH/LiThermal"
 fi
 mkdir -p "$ROOTPATH/LiThermal"
-cp -r "$SRC/include" "$SRC/src" "$SRC/libs" "$SRC/linux_include" "$SRC/rlottie_inc" "$ROOTPATH/LiThermal/"
+cp -r "$SRC/include" "$SRC/src" "$SRC/libs" "$SRC/linux_include" "$SRC/rlottie_inc" "$SRC/tools" "$ROOTPATH/LiThermal/"
 cp "$SRC/CMakeLists.txt" "$SRC/toolchain.cmake" "$ROOTPATH/LiThermal/"
 
 cd "$ROOTPATH"
