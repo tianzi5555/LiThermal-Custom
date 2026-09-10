@@ -13,11 +13,10 @@ bool packet_dumping = false;
 
 // 处理画面录制（数码变焦/对比度之后）
 static AVCodecContext *rec_enc_ctx = NULL;
-static AVFormatContext *rec_ctx = NULL;
-static AVStream *rec_stream = NULL;
 static struct SwsContext *rec_sws = NULL;
 static AVFrame *rec_frame = NULL;
 static AVPacket *rec_pkt = NULL;
+static FILE *rec_file = NULL;
 static bool processed_recording = false;
 static int64_t rec_pts = 0;
 
@@ -229,20 +228,8 @@ bool codec_startProcessedRecording(const char *filename, int width, int height)
     if (rec_sws == NULL)
         return false;
 
-    if (avformat_alloc_output_context2(&rec_ctx, NULL, NULL, filename) < 0)
-        return false;
-    rec_stream = avformat_new_stream(rec_ctx, NULL);
-    if (rec_stream == NULL)
-        return false;
-    avcodec_parameters_from_context(rec_stream->codecpar, rec_enc_ctx);
-    rec_stream->time_base = rec_enc_ctx->time_base;
-
-    if (!(rec_ctx->oformat->flags & AVFMT_NOFILE))
-    {
-        if (avio_open(&rec_ctx->pb, filename, AVIO_FLAG_WRITE) < 0)
-            return false;
-    }
-    if (avformat_write_header(rec_ctx, NULL) < 0)
+    rec_file = fopen(filename, "wb");
+    if (rec_file == NULL)
         return false;
 
     rec_pkt = av_packet_alloc();
@@ -270,9 +257,8 @@ void codec_writeProcessedFrame(const uint8_t *bgra)
             break;
         if (ret < 0)
             break;
-        rec_pkt->stream_index = rec_stream->index;
-        av_packet_rescale_ts(rec_pkt, rec_enc_ctx->time_base, rec_stream->time_base);
-        av_interleaved_write_frame(rec_ctx, rec_pkt);
+        fwrite(rec_pkt->data, 1, rec_pkt->size, rec_file);
+        av_packet_unref(rec_pkt);
     }
 }
 
@@ -284,16 +270,12 @@ void codec_stopProcessedRecording()
     avcodec_send_frame(rec_enc_ctx, NULL);
     while (avcodec_receive_packet(rec_enc_ctx, rec_pkt) == 0)
     {
-        rec_pkt->stream_index = rec_stream->index;
-        av_packet_rescale_ts(rec_pkt, rec_enc_ctx->time_base, rec_stream->time_base);
-        av_interleaved_write_frame(rec_ctx, rec_pkt);
+        fwrite(rec_pkt->data, 1, rec_pkt->size, rec_file);
+        av_packet_unref(rec_pkt);
     }
 
-    av_write_trailer(rec_ctx);
-    if (!(rec_ctx->oformat->flags & AVFMT_NOFILE))
-        avio_closep(&rec_ctx->pb);
-    avformat_free_context(rec_ctx);
-    rec_ctx = NULL;
+    fclose(rec_file);
+    rec_file = NULL;
 
     avcodec_free_context(&rec_enc_ctx);
     rec_enc_ctx = NULL;
