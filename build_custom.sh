@@ -2,13 +2,15 @@
 set -e
 
 ROOTPATH="$(pwd)/compiler"
-SRC="$(pwd)/LiThermal"
+SRC="$(pwd)"
 
-# 用我们自己的源码替换编译器仓库里的 LiThermal 子模块目录
+# 用仓库根目录里的 LiThermal 源码替换编译器仓库里的 LiThermal 子模块目录
 if [ -d "$ROOTPATH/LiThermal" ]; then
     rm -rf "$ROOTPATH/LiThermal"
 fi
-cp -r "$SRC" "$ROOTPATH/LiThermal"
+mkdir -p "$ROOTPATH/LiThermal"
+cp -r "$SRC/include" "$SRC/src" "$SRC/libs" "$SRC/linux_include" "$SRC/rlottie_inc" "$ROOTPATH/LiThermal/"
+cp "$SRC/CMakeLists.txt" "$SRC/toolchain.cmake" "$ROOTPATH/LiThermal/"
 
 cd "$ROOTPATH"
 export STAGING_DIR="$ROOTPATH/target"
