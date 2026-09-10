@@ -14,3 +14,6 @@ public:
 };
 
 extern VideoPlayer videoPlayer;
+
+// 当前数码变焦裁剪区域: cropX,cropY,cropW,cropH,srcW,srcH
+extern int g_last_crop[6];

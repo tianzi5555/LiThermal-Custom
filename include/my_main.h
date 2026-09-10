@@ -76,3 +76,8 @@ void widget_graph_check_visibility();
 void ui_crosshairs_create();
 void ui_crosshairs_updatePos();
 void ui_crosshairs_updateVisibility();
+
+// 本地中心温度/准星显示
+void ui_center_display_create();
+void ui_center_display_update();
+void ui_center_display_updateVisibility();

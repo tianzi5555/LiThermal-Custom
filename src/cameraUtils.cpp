@@ -303,7 +303,7 @@ void CameraUtils::set4117Cursor(bool min, bool max)
             }
             else if (line.find("<streamOverlay>") != std::string::npos)
             {
-                result += "<streamOverlay>true</streamOverlay>\n";
+                result += (min || max) ? "<streamOverlay>true</streamOverlay>\n" : "<streamOverlay>false</streamOverlay>\n";
             }
             else
             {

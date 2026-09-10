@@ -14,7 +14,7 @@ static lv_img_dsc_t img_ir_thumb;
 static lv_obj_t *zoom_pip = NULL;      // 右下角鸟览图容器
 static lv_obj_t *zoom_pip_img = NULL;  // 鸟览图图像
 static lv_obj_t *zoom_pip_rect = NULL; // 鸟览图中的当前区域框
-static int g_last_crop[6] = {0, 0, 0, 0, 0, 0}; // cropX,cropY,cropW,cropH,srcW,srcH
+int g_last_crop[6] = {0, 0, 0, 0, 0, 0}; // cropX,cropY,cropW,cropH,srcW,srcH
 
 pthread_t thread_image_ref;
 static sem_t sem_video;
