@@ -1,0 +1,32 @@
+name: Build custom LiThermal
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout custom source
+        uses: actions/checkout@v4
+
+      - name: Checkout LiThermal_Compiler toolchain
+        uses: actions/checkout@v4
+        with:
+          repository: lxydiy/LiThermal_Compiler
+          path: compiler
+          submodules: false
+
+      - name: Build
+        run: bash ./build_custom.sh
+
+      - name: Pack
+        run: tar -cf UDISK.tar UDISK
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: UDISK.tar
+          path: UDISK.tar

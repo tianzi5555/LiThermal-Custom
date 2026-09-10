@@ -1,0 +1,18 @@
+{
+    "configurations": [
+        {
+            "name": "Linux",
+            "includePath": [
+                "${workspaceFolder}/**",
+                "${workspaceFolder}/libs/lvgl",
+                "~/Desktop/tina-sdk/out/t113-100ask/staging_dir/target/usr/include",
+                "${workspaceFolder}/libs"
+            ],
+            "defines": [],
+            "cStandard": "c17",
+            "cppStandard": "gnu++14",
+            "intelliSenseMode": "linux-gcc-arm"
+        }
+    ],
+    "version": 4
+}
