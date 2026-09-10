@@ -13,14 +13,23 @@ bool packet_dumping = false;
 
 // 处理画面录制（数码变焦/对比度之后）
 #include "utils/tiny_jpeg.h"
-static FILE *rec_file = NULL;
+#include <vector>
+static AVFormatContext *rec_ctx = NULL;
+static AVStream *rec_stream = NULL;
+static AVPacket *rec_pkt = NULL;
+static std::vector<uint8_t> rec_jpeg_buf;
 static uint8_t rec_rgba[320 * 240 * 4];
 static bool processed_recording = false;
+static int64_t rec_pts = 0;
 
 static void rec_write_cb(void *context, void *data, int size)
 {
     if (context != NULL && data != NULL && size > 0)
-        fwrite(data, 1, size, (FILE *)context);
+    {
+        std::vector<uint8_t> *buf = (std::vector<uint8_t> *)context;
+        uint8_t *p = (uint8_t *)data;
+        buf->insert(buf->end(), p, p + size);
+    }
 }
 
 int openInputStream(const char *input_url)
@@ -206,10 +215,41 @@ bool codec_startProcessedRecording(const char *filename, int width, int height)
     if (processed_recording)
         codec_stopProcessedRecording();
 
-    rec_file = fopen(filename, "wb");
-    if (rec_file == NULL)
+    if (avformat_alloc_output_context2(&rec_ctx, NULL, NULL, filename) < 0)
         return false;
 
+    rec_stream = avformat_new_stream(rec_ctx, NULL);
+    if (rec_stream == NULL)
+    {
+        avformat_free_context(rec_ctx);
+        rec_ctx = NULL;
+        return false;
+    }
+
+    rec_stream->codecpar->codec_type = AVMEDIA_TYPE_VIDEO;
+    rec_stream->codecpar->codec_id = AV_CODEC_ID_MJPEG;
+    rec_stream->codecpar->width = 320;
+    rec_stream->codecpar->height = 240;
+    rec_stream->time_base = (AVRational){1, 25};
+
+    if (!(rec_ctx->oformat->flags & AVFMT_NOFILE))
+    {
+        if (avio_open(&rec_ctx->pb, filename, AVIO_FLAG_WRITE) < 0)
+        {
+            avformat_free_context(rec_ctx);
+            rec_ctx = NULL;
+            return false;
+        }
+    }
+    if (avformat_write_header(rec_ctx, NULL) < 0)
+    {
+        avformat_free_context(rec_ctx);
+        rec_ctx = NULL;
+        return false;
+    }
+
+    rec_pkt = av_packet_alloc();
+    rec_pts = 0;
     processed_recording = true;
     return true;
 }
@@ -228,7 +268,20 @@ void codec_writeProcessedFrame(const uint8_t *bgra)
         rec_rgba[i * 4 + 3] = bgra[i * 4 + 3];
     }
 
-    tje_encode_with_func(rec_write_cb, rec_file, 75, 320, 240, 4, rec_rgba);
+    rec_jpeg_buf.clear();
+    tje_encode_with_func(rec_write_cb, &rec_jpeg_buf, 75, 320, 240, 4, rec_rgba);
+    if (rec_jpeg_buf.empty())
+        return;
+
+    av_packet_unref(rec_pkt);
+    if (av_new_packet(rec_pkt, (int)rec_jpeg_buf.size()) < 0)
+        return;
+    memcpy(rec_pkt->data, rec_jpeg_buf.data(), rec_jpeg_buf.size());
+    rec_pkt->stream_index = rec_stream->index;
+    rec_pkt->pts = rec_pts++;
+    rec_pkt->dts = rec_pkt->pts;
+    av_packet_rescale_ts(rec_pkt, rec_stream->time_base, rec_stream->time_base);
+    av_interleaved_write_frame(rec_ctx, rec_pkt);
 }
 
 void codec_stopProcessedRecording()
@@ -236,8 +289,16 @@ void codec_stopProcessedRecording()
     if (!processed_recording)
         return;
 
-    fclose(rec_file);
-    rec_file = NULL;
+    av_write_trailer(rec_ctx);
+    if (!(rec_ctx->oformat->flags & AVFMT_NOFILE))
+        avio_closep(&rec_ctx->pb);
+    avformat_free_context(rec_ctx);
+    rec_ctx = NULL;
+    rec_stream = NULL;
+
+    av_packet_free(&rec_pkt);
+    rec_pkt = NULL;
+
     processed_recording = false;
 }
 
