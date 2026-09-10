@@ -226,6 +226,7 @@ bool codec_startProcessedRecording(const char *filename, int width, int height)
         return false;
     }
 
+    // 我们写入的是 320x240 的 tiny_jpeg 编码帧，参数必须与实际帧一致
     rec_stream->codecpar->codec_type = AVMEDIA_TYPE_VIDEO;
     rec_stream->codecpar->codec_id = AV_CODEC_ID_MJPEG;
     rec_stream->codecpar->width = 320;
@@ -269,7 +270,11 @@ void codec_writeProcessedFrame(const uint8_t *bgra)
     }
 
     rec_jpeg_buf.clear();
-    tje_encode_with_func(rec_write_cb, &rec_jpeg_buf, 75, 320, 240, 4, rec_rgba);
+    if (tje_encode_with_func(rec_write_cb, &rec_jpeg_buf, 3, 320, 240, 4, rec_rgba) == 0)
+    {
+        fprintf(stderr, "processed recording: tiny_jpeg encode failed\n");
+        return;
+    }
     if (rec_jpeg_buf.empty())
         return;
 
