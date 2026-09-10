@@ -1,4 +1,18 @@
 #include <my_main.h>
+#include <stdarg.h>
+static void camlog(const char *fmt, ...)
+{
+    FILE *f = fopen("/tmp/lithermal_rec.log", "a");
+    if (f == NULL)
+        return;
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(f, fmt, ap);
+    va_end(ap);
+    fflush(f);
+    fclose(f);
+}
+
 static void flash_bang_effect()
 {
     LOCKLV();
@@ -49,6 +63,7 @@ void camera_record_toggle_dump_stream()
         return;
     if (recording_processed == true)
     {
+        camlog("toggle: stop\n");
         flash_bang_effect();
         LOCKLV();
         if (tm_create_circle)
@@ -77,10 +92,12 @@ void camera_record_toggle_dump_stream()
     }
     else
     {
+        camlog("toggle: start\n");
         char file_name_buffer[128];
         const char *name_partial = allocateNewFilename();
         if (name_partial == NULL)
         {
+            camlog("toggle: allocate filename failed\n");
             // TODO: 添加错误提示
             return;
         }
@@ -88,12 +105,14 @@ void camera_record_toggle_dump_stream()
         sprintf(file_name_buffer, "%s.mjpeg", name_partial);
         if (!codec_startProcessedRecording(file_name_buffer, 320, 240))
         {
+            camlog("toggle: startProcessedRecording failed for %s\n", file_name_buffer);
             printf("Failed to start processed recording\n");
             return;
         }
         recording_processed = true;
         sprintf(file_name_buffer, "%s.raw", name_partial);
         remove(file_name_buffer); // 避免识别成照片
+        LOCKLV();
         lot_rec = lv_rlottie_create_from_raw(lv_layer_top(), 200, 200, lottie_rec);
         lv_obj_center(lot_rec);
         lv_rlottie_set_play_mode(lot_rec, LV_RLOTTIE_CTRL_PLAY);
@@ -126,5 +145,6 @@ void camera_record_toggle_dump_stream()
                 }, 700, NULL);
             lv_timer_del(tm_create_circle);
             tm_create_circle = NULL; }, 3000, 0);
+        UNLOCKLV();
     }
 }

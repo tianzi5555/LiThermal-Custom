@@ -1,8 +1,10 @@
 #include "httplib.h"
 #include "cameraUtils.h"
+#include <mutex>
 
 httplib::Client cli(CAMERA_HOST_URL);
 CameraUtils cameraUtils;
+static std::mutex cli_mutex; // httplib::Client 不是线程安全的，串行化所有 HTTP 请求
 
 #define IF_CHECK_FILENAME "/proc/net/dev"
 #define IF_CHECK_NAME "usb0"
@@ -36,6 +38,7 @@ void CameraUtils::initHTTPClient()
 #include <cJSON.h>
 void CameraUtils::getTemperature()
 {
+    std::lock_guard<std::mutex> cli_lock(cli_mutex);
     auto res = cli.Get("/ISAPI/Thermal/channels/1/thermometry/1/rulesTemperatureInfo?format=json");
     if (res && res->status == 200)
     {
@@ -109,6 +112,7 @@ const char *color_palette[] = {
 
 void CameraUtils::setColorPalette(int palette)
 {
+    std::lock_guard<std::mutex> cli_lock(cli_mutex);
     std::string data = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Palettes><mode>";
     if (palette < 0 || palette >= IR_COLOR_PALETTE_MAX)
         palette = IR_COLOR_PALETTE_DEFAULT;
@@ -119,6 +123,7 @@ void CameraUtils::setColorPalette(int palette)
 
 void CameraUtils::setDigitalNoiceReduce(int mode, int frameLevel, int interFrameLevel)
 {
+    std::lock_guard<std::mutex> cli_lock(cli_mutex);
     std::string data;
     //= "<?xml version=\"1.0\" encoding=\"UTF-8\"?><DigitalNoiseReduction><mode>";
     if (mode < IR_DNR_MODE_CLOSE || mode > IR_DNR_MODE_ADVANCED)
@@ -144,6 +149,7 @@ void CameraUtils::setDigitalNoiceReduce(int mode, int frameLevel, int interFrame
 
 void CameraUtils::setDigitalDetailEnhancement(bool en, int level)
 {
+    std::lock_guard<std::mutex> cli_lock(cli_mutex);
     std::string data;
     if (level < 0 || level > 100)
         level = 50;
@@ -201,6 +207,7 @@ static std::vector<std::string> split_multipart(const std::string &body, const s
 
 float CameraUtils::readJpegWithExtra(const char *save_filename, int result_x, int result_y)
 {
+    std::lock_guard<std::mutex> cli_lock(cli_mutex);
     auto res = cli.Get("/ISAPI/Thermal/channels/1/thermometry/jpegPicWithAppendData?format=json");
     if (res && res->status == 200)
     {
@@ -238,6 +245,7 @@ float CameraUtils::readJpegWithExtra(const char *save_filename, int result_x, in
 
 void CameraUtils::setCenterMeasure(bool en)
 {
+    std::lock_guard<std::mutex> cli_lock(cli_mutex);
     auto res = cli.Get("/ISAPI/Thermal/channels/1/temperatureCorrect?format=json");
     char data[1024];
     if (res && res->status == 200)
@@ -254,11 +262,13 @@ void CameraUtils::setCenterMeasure(bool en)
 
 void CameraUtils::calibrateManually()
 {
+    std::lock_guard<std::mutex> cli_lock(cli_mutex);
     cli.Put("/ISAPI/Image/channels/1/ManualShutterCorrect", "", "application/xml");
 }
 
 void CameraUtils::set4117Cursor(bool min, bool max)
 {
+    std::lock_guard<std::mutex> cli_lock(cli_mutex);
     auto res = cli.Get("/ISAPI/Thermal/channels/1/thermometry/basicParam");
     int len;
     if (res && res->status == 200) {

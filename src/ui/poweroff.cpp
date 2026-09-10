@@ -1,4 +1,16 @@
 #include "my_main.h"
+#include <sys/time.h>
+
+static uint32_t poweroff_get_ms()
+{
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (uint32_t)(tv.tv_sec * 1000 + tv.tv_usec / 1000);
+}
+
+static bool power_key_was_pressed = false;
+static uint32_t power_key_press_start = 0;
+static bool short_press_handled = false;
 
 static void doPoweroff()
 {
@@ -15,6 +27,7 @@ static void lv_ui_poweroff()
 {
     if (blackOverlay != NULL)
         return;
+    animation_opa = 0;
     LOCKLV();
     blackOverlay = lv_obj_create(lv_layer_sys());
     mycardPower.create(lv_layer_sys());
@@ -80,13 +93,35 @@ static void lv_ui_poweroff()
 
 void refresh_poweroff_key()
 {
+    uint32_t now = poweroff_get_ms();
+
     if (HAL::key_pressed[0] == true)
     {
-        poweroff_started = true;
-        lv_ui_poweroff();
+        if (power_key_was_pressed == false)
+        {
+            power_key_was_pressed = true;
+            power_key_press_start = now;
+            short_press_handled = false;
+        }
+        // 长按超过 1 秒才进入关机提示/关机流程
+        if (now - power_key_press_start >= 1000)
+        {
+            poweroff_started = true;
+            lv_ui_poweroff();
+        }
     }
     else
     {
+        if (power_key_was_pressed == true)
+        {
+            // 1 秒内松开：执行一次手动清除噪声（快门校正）
+            if (short_press_handled == false && (now - power_key_press_start) < 1000)
+            {
+                short_press_handled = true;
+                cameraUtils.calibrateManually();
+            }
+            power_key_was_pressed = false;
+        }
         poweroff_started = false;
     }
 }

@@ -14,6 +14,8 @@ bool packet_dumping = false;
 // 处理画面录制（数码变焦/对比度之后）
 #include "utils/tiny_jpeg.h"
 #include <vector>
+#include <stdarg.h>
+#include <mutex>
 static AVFormatContext *rec_ctx = NULL;
 static AVStream *rec_stream = NULL;
 static AVPacket *rec_pkt = NULL;
@@ -21,6 +23,21 @@ static std::vector<uint8_t> rec_jpeg_buf;
 static uint8_t rec_rgba[320 * 240 * 4];
 static bool processed_recording = false;
 static int64_t rec_pts = 0;
+static int rec_write_count = 0;
+static std::mutex rec_mutex; // 保护录像状态，防止视频线程写帧与 UI 线程启停冲突
+
+static void rec_log(const char *fmt, ...)
+{
+    FILE *f = fopen("/tmp/lithermal_rec.log", "a");
+    if (f == NULL)
+        return;
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(f, fmt, ap);
+    va_end(ap);
+    fflush(f);
+    fclose(f);
+}
 
 static void rec_write_cb(void *context, void *data, int size)
 {
@@ -208,19 +225,49 @@ void codec_enablePacketDumping(bool en, const char *dump_target)
     }
 }
 
+// 调用前必须已持有 rec_mutex
+static void codec_stopProcessedRecording_locked()
+{
+    if (!processed_recording)
+        return;
+
+    rec_log("stop: frames=%d pts=%lld\n", rec_write_count, (long long)rec_pts);
+    int ret = av_write_trailer(rec_ctx);
+    rec_log("stop: write_trailer ret=%d\n", ret);
+    if (!(rec_ctx->oformat->flags & AVFMT_NOFILE))
+        avio_closep(&rec_ctx->pb);
+    avformat_free_context(rec_ctx);
+    rec_ctx = NULL;
+    rec_stream = NULL;
+
+    av_packet_free(&rec_pkt);
+    rec_pkt = NULL;
+
+    processed_recording = false;
+    rec_log("stop: done\n");
+}
+
 bool codec_startProcessedRecording(const char *filename, int width, int height)
 {
     (void)width;
     (void)height;
+    std::lock_guard<std::mutex> lock(rec_mutex);
+    rec_log("start: %s\n", filename);
     if (processed_recording)
-        codec_stopProcessedRecording();
+        codec_stopProcessedRecording_locked();
 
-    if (avformat_alloc_output_context2(&rec_ctx, NULL, NULL, filename) < 0)
+    int ret = avformat_alloc_output_context2(&rec_ctx, NULL, NULL, filename);
+    if (ret < 0)
+    {
+        rec_log("start: alloc_output_context2 failed ret=%d\n", ret);
         return false;
+    }
+    rec_log("start: oformat=%s flags=0x%x\n", rec_ctx->oformat->name ? rec_ctx->oformat->name : "null", rec_ctx->oformat->flags);
 
     rec_stream = avformat_new_stream(rec_ctx, NULL);
     if (rec_stream == NULL)
     {
+        rec_log("start: new_stream failed\n");
         avformat_free_context(rec_ctx);
         rec_ctx = NULL;
         return false;
@@ -237,13 +284,18 @@ bool codec_startProcessedRecording(const char *filename, int width, int height)
     {
         if (avio_open(&rec_ctx->pb, filename, AVIO_FLAG_WRITE) < 0)
         {
+            rec_log("start: avio_open failed\n");
             avformat_free_context(rec_ctx);
             rec_ctx = NULL;
             return false;
         }
     }
-    if (avformat_write_header(rec_ctx, NULL) < 0)
+    ret = avformat_write_header(rec_ctx, NULL);
+    if (ret < 0)
     {
+        rec_log("start: write_header failed ret=%d\n", ret);
+        if (!(rec_ctx->oformat->flags & AVFMT_NOFILE))
+            avio_closep(&rec_ctx->pb);
         avformat_free_context(rec_ctx);
         rec_ctx = NULL;
         return false;
@@ -251,12 +303,15 @@ bool codec_startProcessedRecording(const char *filename, int width, int height)
 
     rec_pkt = av_packet_alloc();
     rec_pts = 0;
+    rec_write_count = 0;
     processed_recording = true;
+    rec_log("start: ok\n");
     return true;
 }
 
 void codec_writeProcessedFrame(const uint8_t *bgra)
 {
+    std::lock_guard<std::mutex> lock(rec_mutex);
     if (!processed_recording)
         return;
 
@@ -272,39 +327,37 @@ void codec_writeProcessedFrame(const uint8_t *bgra)
     rec_jpeg_buf.clear();
     if (tje_encode_with_func(rec_write_cb, &rec_jpeg_buf, 3, 320, 240, 4, rec_rgba) == 0)
     {
+        rec_log("write: tiny_jpeg encode failed\n");
         fprintf(stderr, "processed recording: tiny_jpeg encode failed\n");
         return;
     }
     if (rec_jpeg_buf.empty())
+    {
+        rec_log("write: empty jpeg\n");
         return;
+    }
 
     av_packet_unref(rec_pkt);
     if (av_new_packet(rec_pkt, (int)rec_jpeg_buf.size()) < 0)
+    {
+        rec_log("write: av_new_packet failed size=%d\n", (int)rec_jpeg_buf.size());
         return;
+    }
     memcpy(rec_pkt->data, rec_jpeg_buf.data(), rec_jpeg_buf.size());
     rec_pkt->stream_index = rec_stream->index;
     rec_pkt->pts = rec_pts++;
     rec_pkt->dts = rec_pkt->pts;
     av_packet_rescale_ts(rec_pkt, rec_stream->time_base, rec_stream->time_base);
-    av_interleaved_write_frame(rec_ctx, rec_pkt);
+    int ret = av_interleaved_write_frame(rec_ctx, rec_pkt);
+    if (rec_write_count < 5 || ret < 0)
+        rec_log("write: count=%d size=%d ret=%d\n", rec_write_count, (int)rec_jpeg_buf.size(), ret);
+    rec_write_count++;
 }
 
 void codec_stopProcessedRecording()
 {
-    if (!processed_recording)
-        return;
-
-    av_write_trailer(rec_ctx);
-    if (!(rec_ctx->oformat->flags & AVFMT_NOFILE))
-        avio_closep(&rec_ctx->pb);
-    avformat_free_context(rec_ctx);
-    rec_ctx = NULL;
-    rec_stream = NULL;
-
-    av_packet_free(&rec_pkt);
-    rec_pkt = NULL;
-
-    processed_recording = false;
+    std::lock_guard<std::mutex> lock(rec_mutex);
+    codec_stopProcessedRecording_locked();
 }
 
 AVFrame *codec_getFrame()
