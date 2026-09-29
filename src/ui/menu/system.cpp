@@ -17,6 +17,12 @@ bool system_crosshair_option_focused()
 static lv_obj_t *ui_SliderBrightness;
 static lv_obj_t *ui_LabelBrightnessVal;
 
+bool system_brightness_option_focused()
+{
+    return (ui_SliderBrightness != NULL && lv_obj_is_valid(ui_SliderBrightness) &&
+            lv_group_get_focused(lv_group_get_default()) == ui_SliderBrightness);
+}
+
 static void brightness_slider_event(lv_event_t *e)
 {
     uint32_t v = lv_slider_get_value((lv_obj_t *)e->target);

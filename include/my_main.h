@@ -2,6 +2,7 @@
 // 参数配置
 #define VIDEO_STREAM_URL "rtsp://admin:Ab123456@192.168.64.64"
 #define GALLERY_PATH "/mnt/UDISK/DCIM" // 如需修改存储位置，需同时修改 lv_conf.h: LV_FS_STDIO_PATH
+#define GALLERY2_PATH "/mnt/UDISK/dcim2" // 隐藏相册目录（系统设置里亮度条上按录像键进入）
 // 注意：图像命名格式固定为：CAP+5位数字.[jpeg/mp4]
 #define SETTINGS_PATH "/mnt/UDISK/settings.dat"
 // 系统头文件
@@ -69,6 +70,11 @@ void crosshair_settings_show();
 void crosshair_settings_hide();
 bool crosshair_settings_is_open();
 bool system_crosshair_option_focused();
+bool system_brightness_option_focused();
+
+// 隐藏相册（dcim2）：在系统设置亮度条上按录像键进入
+void menu_hidden_gallery_show();
+void menu_system_hide();
 
 /// @brief 相册事件检查
 /// @param has_hal_go_back_event 如果为true，代表返回（菜单）按键按下

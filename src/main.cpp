@@ -72,6 +72,7 @@ int main()
 {
     sleep(1); // Why?
     system("mkdir " GALLERY_PATH);
+    system("mkdir " GALLERY2_PATH);
     pthread_mutex_init(&lv_mutex, NULL);
     HAL::init();
     readFiles(GALLERY_PATH);

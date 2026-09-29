@@ -114,11 +114,12 @@ void refresh_poweroff_key()
     {
         if (power_key_was_pressed == true)
         {
-            // 1 秒内松开：执行一次手动清除噪声（快门校正）
+            // 1 秒内松开：短按电源键拍照
             if (short_press_handled == false && (now - power_key_press_start) < 1000)
             {
                 short_press_handled = true;
-                cameraUtils.calibrateManually();
+                if (current_mode == MODE_MAINPAGE)
+                    camera_take_photo_from_stream();
             }
             power_key_was_pressed = false;
         }

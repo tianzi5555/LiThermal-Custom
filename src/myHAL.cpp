@@ -182,7 +182,8 @@ void *thread_hal_func(void *)
             }
             if (HAL::key_press_event[3])
             {
-                camera_take_photo_from_stream();
+                // 波轮按下：手动清除噪声（快门校正）
+                cameraUtils.calibrateManually();
                 HAL::key_press_event[3] = false;
             }
         }
@@ -201,6 +202,14 @@ void *thread_hal_func(void *)
                     LOCKLV();
                     crosshair_settings_show();
                     UNLOCKLV();
+                }
+                else if (system_brightness_option_focused())
+                {
+                    // 亮度条上按录像键：进入隐藏相册（dcim2）
+                    LOCKLV();
+                    menu_system_hide();
+                    UNLOCKLV();
+                    menu_hidden_gallery_show();
                 }
             }
             else

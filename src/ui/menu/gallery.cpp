@@ -1,5 +1,9 @@
 #include <my_main.h>
 
+// 当前相册浏览的目录。默认主相册 DCIM；进入隐藏相册时切换到 dcim2。
+static const char *g_gallery_path = GALLERY_PATH;
+static bool g_hidden_gallery = false; // 是否处于隐藏相册（dcim2）
+
 static lv_obj_t *image_obj[5];
 static lv_color_t canvas_buffer[5][240 * 180];
 static lv_color_t canvas_fullscreen_buffer[320 * 240];
@@ -54,13 +58,13 @@ static photo_type_t getPhotoType(int id)
 {
     char filename_buffer[128];
     struct stat s;
-    sprintf(filename_buffer, GALLERY_PATH "/CAP%05d.jpeg", id);
+    sprintf(filename_buffer, "%s/CAP%05d.jpeg", g_gallery_path, id);
     if (stat(filename_buffer, &s) != 0)
         return PHOTO_TYPE_FILE_NOT_FOUND;
-    sprintf(filename_buffer, GALLERY_PATH "/CAP%05d.raw", id);
+    sprintf(filename_buffer, "%s/CAP%05d.raw", g_gallery_path, id);
     if (stat(filename_buffer, &s) == 0)
         return PHOTO_TYPE_RAW_CAPTURE;
-    sprintf(filename_buffer, GALLERY_PATH "/CAP%05d.mp4", id);
+    sprintf(filename_buffer, "%s/CAP%05d.mp4", g_gallery_path, id);
     if (stat(filename_buffer, &s) == 0)
         return PHOTO_TYPE_VIDEO;
     return PHOTO_TYPE_SCREENSHOT;
@@ -74,7 +78,7 @@ static void image_obj_render(int obj_id)
     char filename_buffer[128];
     if (image_src_id[obj_id] < 0)
         return;
-    sprintf(filename_buffer, "/mnt/UDISK/DCIM/CAP%05d.jpeg", image_src_id[obj_id]);
+    sprintf(filename_buffer, "%s/CAP%05d.jpeg", g_gallery_path, image_src_id[obj_id]);
     lv_obj_t *obj_canvas = lv_obj_get_child(image_obj[obj_id], 0);
     canvas_draw_dsc.antialias = 0;
     switch (getPhotoType(image_src_id[obj_id]))
@@ -250,7 +254,7 @@ static void image_obj_del_current()
         }
         freeFileName(img_id_to_remove);
         char command_buffer[128];
-        sprintf(command_buffer, "rm " GALLERY_PATH "/CAP%05d.*", img_id_to_remove);
+        sprintf(command_buffer, "rm %s/CAP%05d.*", g_gallery_path, img_id_to_remove);
         system(command_buffer);
         if (totalImages == 0)
         {
@@ -327,7 +331,7 @@ static void full_screen_show(int id)
         lv_obj_del(ffmpeg_fullscreen);
     if (type == PHOTO_TYPE_VIDEO)
     {
-        sprintf(file_name_buffer, GALLERY_PATH "/CAP%05d.mp4", id);
+        sprintf(file_name_buffer, "%s/CAP%05d.mp4", g_gallery_path, id);
         ffmpeg_fullscreen = lv_ffmpeg_player_create(lv_layer_top());
         lv_ffmpeg_player_set_src(ffmpeg_fullscreen, file_name_buffer);
         lv_ffmpeg_player_set_cmd(ffmpeg_fullscreen, LV_FFMPEG_PLAYER_CMD_START);
@@ -336,7 +340,7 @@ static void full_screen_show(int id)
     }
     else
     {
-        sprintf(file_name_buffer, GALLERY_PATH "/CAP%05d.jpeg", id);
+        sprintf(file_name_buffer, "%s/CAP%05d.jpeg", g_gallery_path, id);
         ffmpeg_fullscreen = lv_canvas_create(lv_layer_top());
         lv_canvas_set_buffer(ffmpeg_fullscreen, canvas_fullscreen_buffer, 320, 240, LV_IMG_CF_TRUE_COLOR);
         if (type == PHOTO_TYPE_RAW_CAPTURE)
@@ -392,12 +396,15 @@ void createDeleteButton(lv_obj_t *parent)
 /////////////////////////////////////////////// 相册功能及相关状态
 void menu_gallery_show()
 {
-    readFiles(GALLERY_PATH);
+    readFiles(g_gallery_path);
     totalImages = getTotalImages();
     centerImageID = totalImages;
     if (totalImages == 0)
     {
         current_mode = MODE_MAINPAGE;
+        g_hidden_gallery = false;
+        g_gallery_path = GALLERY_PATH;
+        readFiles(GALLERY_PATH); // 恢复主相册文件名位图
         return;
     }
     if (totalImages < 4)
@@ -432,6 +439,20 @@ static void menu_gallery_hide()
     lv_obj_del_delayed(card_gallery.obj, MY_MOVE_ANIM_DEFAULT_TIME);
     card_gallery.obj = NULL;
     lbl_fileid = NULL;
+    // 离开相册后恢复到主相册目录，避免下次普通相册仍指向 dcim2
+    g_hidden_gallery = false;
+    g_gallery_path = GALLERY_PATH;
+    // 恢复主相册的文件名分配位图，避免拍照/录像时文件名错乱
+    readFiles(GALLERY_PATH);
+}
+
+// 进入隐藏相册（dcim2），在系统设置里亮度条上按录像键触发
+void menu_hidden_gallery_show()
+{
+    g_hidden_gallery = true;
+    g_gallery_path = GALLERY2_PATH;
+    current_mode = MODE_GALLERY;
+    menu_gallery_show();
 }
 
 void menu_gallery_loop(bool has_hal_go_back_event)
