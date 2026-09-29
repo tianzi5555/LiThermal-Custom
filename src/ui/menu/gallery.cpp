@@ -1,4 +1,7 @@
 #include <my_main.h>
+#include <dirent.h>
+#include <string.h>
+#include <strings.h>
 
 // 当前相册浏览的目录。默认主相册 DCIM；进入隐藏相册时切换到 dcim2。
 static const char *g_gallery_path = GALLERY_PATH;
@@ -447,8 +450,134 @@ static void menu_gallery_hide()
 }
 
 // 进入隐藏相册（dcim2），在系统设置里亮度条上按录像键触发
+//
+// dcim2 里允许放任意命名的图片/视频，进入时先做一次“整理”：
+// - 相册引擎只认 CAPxxxxx.jpeg / CAPxxxxx.mp4（视频还需要同名 jpeg 作缩略图）
+// - 图片 -> 缩放成 CAPxxxxx.jpeg（当作照片显示）
+// - 视频 -> 抽首帧做 CAPxxxxx.jpeg 缩略图，并重命名为 CAPxxxxx.mp4
+// 用设备自带 ffmpeg 完成，处理后删除/改名原文件。
+static int hidden_next_cap_id()
+{
+    // 扫描 dcim2 里已有的 CAP 编号，返回下一个可用编号
+    DIR *dir = opendir(GALLERY2_PATH);
+    if (dir == NULL)
+        return 0;
+    int max_id = -1;
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL)
+    {
+        int id = -1;
+        if (sscanf(entry->d_name, "CAP%d.", &id) == 1)
+        {
+            if (id > max_id)
+                max_id = id;
+        }
+    }
+    closedir(dir);
+    return max_id + 1;
+}
+
+static bool has_ext(const char *name, const char *ext)
+{
+    const char *dot = strrchr(name, '.');
+    if (dot == NULL)
+        return false;
+    return strcasecmp(dot + 1, ext) == 0;
+}
+
+static bool is_image_ext(const char *name)
+{
+    return has_ext(name, "jpg") || has_ext(name, "jpeg") ||
+           has_ext(name, "png") || has_ext(name, "bmp");
+}
+
+static bool is_video_ext(const char *name)
+{
+    return has_ext(name, "mp4") || has_ext(name, "avi") ||
+           has_ext(name, "mov") || has_ext(name, "mkv") ||
+           has_ext(name, "mjpeg") || has_ext(name, "mjpg");
+}
+
+static void hidden_gallery_normalize()
+{
+    DIR *dir = opendir(GALLERY2_PATH);
+    if (dir == NULL)
+        return;
+    // 先把待处理的文件名收集起来，避免边遍历边改动目录
+    static char pending[64][256];
+    int n = 0;
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL && n < 64)
+    {
+        if (entry->d_type == DT_DIR)
+            continue;
+        int dummy;
+        // 已经是标准命名的跳过
+        if (sscanf(entry->d_name, "CAP%d.", &dummy) == 1)
+            continue;
+        if (is_image_ext(entry->d_name) || is_video_ext(entry->d_name))
+        {
+            strncpy(pending[n], entry->d_name, sizeof(pending[n]) - 1);
+            pending[n][sizeof(pending[n]) - 1] = '\0';
+            ++n;
+        }
+    }
+    closedir(dir);
+
+    char cmd[1024];
+    char src[512];
+    char thumb[128];
+    char dstvid[128];
+    for (int i = 0; i < n; ++i)
+    {
+        int id = hidden_next_cap_id();
+        snprintf(src, sizeof(src), "%s/%s", GALLERY2_PATH, pending[i]);
+        snprintf(thumb, sizeof(thumb), "%s/CAP%05d.jpeg", GALLERY2_PATH, id);
+
+        if (is_video_ext(pending[i]))
+        {
+            snprintf(dstvid, sizeof(dstvid), "%s/CAP%05d.mp4", GALLERY2_PATH, id);
+            // 抽首帧做缩略图
+            snprintf(cmd, sizeof(cmd),
+                     "ffmpeg -y -i '%s' -vframes 1 -vf scale=320:240 '%s' >/dev/null 2>&1",
+                     src, thumb);
+            system(cmd);
+            // 原视频重命名为 CAPxxxxx.mp4（若非 mp4 则转码）
+            if (has_ext(pending[i], "mp4"))
+            {
+                snprintf(cmd, sizeof(cmd), "mv '%s' '%s'", src, dstvid);
+                system(cmd);
+            }
+            else
+            {
+                snprintf(cmd, sizeof(cmd),
+                         "ffmpeg -y -i '%s' -c:v mpeg4 -q:v 5 -an '%s' >/dev/null 2>&1",
+                         src, dstvid);
+                if (system(cmd) == 0)
+                {
+                    snprintf(cmd, sizeof(cmd), "rm -f '%s'", src);
+                    system(cmd);
+                }
+            }
+        }
+        else // 图片
+        {
+            // 缩放成 320x240 的 jpeg 当作照片
+            snprintf(cmd, sizeof(cmd),
+                     "ffmpeg -y -i '%s' -vf scale=320:240 '%s' >/dev/null 2>&1",
+                     src, thumb);
+            if (system(cmd) == 0)
+            {
+                snprintf(cmd, sizeof(cmd), "rm -f '%s'", src);
+                system(cmd);
+            }
+        }
+    }
+}
+
 void menu_hidden_gallery_show()
 {
+    hidden_gallery_normalize();
     g_hidden_gallery = true;
     g_gallery_path = GALLERY2_PATH;
     current_mode = MODE_GALLERY;
