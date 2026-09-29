@@ -12,15 +12,18 @@ int video_stream_index = -1;
 bool packet_dumping = false;
 
 // 处理画面录制（数码变焦/对比度之后）
-#include "utils/tiny_jpeg.h"
+// 采用 MPEG-4 Part 2 (AV_CODEC_ID_MPEG4) 真正重新编码为标准 MP4 视频流，
+// 使录制文件在电脑上可直接双击播放，而不是仅把 MJPEG 帧塞进 MP4 容器。
 #include <vector>
 #include <stdarg.h>
 #include <pthread.h>
 static AVFormatContext *rec_ctx = NULL;
 static AVStream *rec_stream = NULL;
 static AVPacket *rec_pkt = NULL;
-static std::vector<uint8_t> rec_jpeg_buf;
-static uint8_t rec_rgba[320 * 240 * 4];
+static AVCodecContext *rec_enc_ctx = NULL;   // MPEG-4 视频编码器上下文
+static struct SwsContext *rec_sws = NULL;    // BGRA -> YUV420P 转换
+static AVFrame *rec_yuv = NULL;              // 编码器输入帧
+static uint8_t rec_bgra[320 * 240 * 4];      // 视频线程写入的最新一帧（BGRA）
 static bool processed_recording = false;
 static int64_t rec_pts = 0;
 static int rec_write_count = 0;
@@ -46,15 +49,6 @@ static void rec_log(const char *fmt, ...)
     fclose(f);
 }
 
-static void rec_write_cb(void *context, void *data, int size)
-{
-    if (context != NULL && data != NULL && size > 0)
-    {
-        std::vector<uint8_t> *buf = (std::vector<uint8_t> *)context;
-        uint8_t *p = (uint8_t *)data;
-        buf->insert(buf->end(), p, p + size);
-    }
-}
 
 int openInputStream(const char *input_url)
 {
@@ -232,8 +226,36 @@ void codec_enablePacketDumping(bool en, const char *dump_target)
     }
 }
 
-// 编码线程：只负责把 rec_rgba 编码成 JPEG 并写入 muxer。
-// 注意：只有本线程会写 rec_ctx/rec_pkt/rec_jpeg_buf，start/stop 只在线程未运行时初始化/销毁它们。
+// 编码线程：把 rec_bgra 转成 YUV420P 并用 MPEG-4 编码器编码，写入 MP4 muxer。
+// 注意：只有本线程会写 rec_ctx/rec_pkt/rec_enc_ctx/rec_yuv，start/stop 只在线程未运行时初始化/销毁它们。
+static void rec_encode_and_write(AVFrame *in_frame)
+{
+    int ret = avcodec_send_frame(rec_enc_ctx, in_frame);
+    if (ret < 0)
+    {
+        rec_log("write: send_frame failed ret=%d\n", ret);
+        return;
+    }
+    while (ret >= 0)
+    {
+        ret = avcodec_receive_packet(rec_enc_ctx, rec_pkt);
+        if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
+            break;
+        else if (ret < 0)
+        {
+            rec_log("write: receive_packet failed ret=%d\n", ret);
+            break;
+        }
+        rec_pkt->stream_index = rec_stream->index;
+        av_packet_rescale_ts(rec_pkt, rec_enc_ctx->time_base, rec_stream->time_base);
+        int wret = av_interleaved_write_frame(rec_ctx, rec_pkt);
+        if (rec_write_count < 5 || wret < 0)
+            rec_log("write: count=%d size=%d ret=%d\n", rec_write_count, rec_pkt->size, wret);
+        rec_write_count++;
+        av_packet_unref(rec_pkt);
+    }
+}
+
 static void *rec_thread_func(void *)
 {
     for (;;)
@@ -246,35 +268,16 @@ static void *rec_thread_func(void *)
             pthread_mutex_unlock(&rec_frame_mutex);
             break;
         }
-        // pending 为 true，视频线程不会覆盖 rec_rgba，可以解锁后慢慢编码
+        // pending 为 true，视频线程不会覆盖 rec_bgra，可以解锁后慢慢编码
         pthread_mutex_unlock(&rec_frame_mutex);
 
-        rec_jpeg_buf.clear();
-        if (tje_encode_with_func(rec_write_cb, &rec_jpeg_buf, 3, 320, 240, 4, rec_rgba) == 0)
-        {
-            rec_log("write: tiny_jpeg encode failed\n");
-            fprintf(stderr, "processed recording: tiny_jpeg encode failed\n");
-        }
-        else if (!rec_jpeg_buf.empty())
-        {
-            av_packet_unref(rec_pkt);
-            if (av_new_packet(rec_pkt, (int)rec_jpeg_buf.size()) == 0)
-            {
-                memcpy(rec_pkt->data, rec_jpeg_buf.data(), rec_jpeg_buf.size());
-                rec_pkt->stream_index = rec_stream->index;
-                rec_pkt->pts = rec_pts++;
-                rec_pkt->dts = rec_pkt->pts;
-                av_packet_rescale_ts(rec_pkt, rec_stream->time_base, rec_stream->time_base);
-                int ret = av_interleaved_write_frame(rec_ctx, rec_pkt);
-                if (rec_write_count < 5 || ret < 0)
-                    rec_log("write: count=%d size=%d ret=%d\n", rec_write_count, (int)rec_jpeg_buf.size(), ret);
-                rec_write_count++;
-            }
-            else
-            {
-                rec_log("write: av_new_packet failed size=%d\n", (int)rec_jpeg_buf.size());
-            }
-        }
+        // BGRA -> YUV420P
+        const uint8_t *src_slices[1] = {rec_bgra};
+        int src_stride[1] = {320 * 4};
+        sws_scale(rec_sws, src_slices, src_stride, 0, 240,
+                  rec_yuv->data, rec_yuv->linesize);
+        rec_yuv->pts = rec_pts++;
+        rec_encode_and_write(rec_yuv);
 
         pthread_mutex_lock(&rec_frame_mutex);
         rec_frame_pending = false;
@@ -309,20 +312,104 @@ bool codec_startProcessedRecording(const char *filename, int width, int height)
         return false;
     }
 
-    // 我们写入的是 320x240 的 tiny_jpeg 编码帧，参数必须与实际帧一致
+    // 用 MPEG-4 Part 2 编码器真正编码为标准 MP4 视频流
+    AVCodec *encoder = avcodec_find_encoder(AV_CODEC_ID_MPEG4);
+    if (encoder == NULL)
+    {
+        rec_log("start: find MPEG4 encoder failed\n");
+        avformat_free_context(rec_ctx);
+        rec_ctx = NULL;
+        rec_stream = NULL;
+        return false;
+    }
+    rec_enc_ctx = avcodec_alloc_context3(encoder);
+    if (rec_enc_ctx == NULL)
+    {
+        rec_log("start: alloc encoder ctx failed\n");
+        avformat_free_context(rec_ctx);
+        rec_ctx = NULL;
+        rec_stream = NULL;
+        return false;
+    }
+    rec_enc_ctx->width = 320;
+    rec_enc_ctx->height = 240;
+    rec_enc_ctx->pix_fmt = AV_PIX_FMT_YUV420P;
+    rec_enc_ctx->time_base = (AVRational){1, 25};
+    rec_enc_ctx->framerate = (AVRational){25, 1};
+    rec_enc_ctx->gop_size = 25;
+    rec_enc_ctx->max_b_frames = 0;
+    rec_enc_ctx->bit_rate = 1500000; // 约 1.5Mbps，适合 320x240
+    if (rec_ctx->oformat->flags & AVFMT_GLOBALHEADER)
+        rec_enc_ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+
+    ret = avcodec_open2(rec_enc_ctx, encoder, NULL);
+    if (ret < 0)
+    {
+        rec_log("start: open encoder failed ret=%d\n", ret);
+        avcodec_free_context(&rec_enc_ctx);
+        avformat_free_context(rec_ctx);
+        rec_ctx = NULL;
+        rec_stream = NULL;
+        return false;
+    }
+
     rec_stream->codecpar->codec_type = AVMEDIA_TYPE_VIDEO;
-    rec_stream->codecpar->codec_id = AV_CODEC_ID_MJPEG;
-    rec_stream->codecpar->width = 320;
-    rec_stream->codecpar->height = 240;
-    rec_stream->time_base = (AVRational){1, 25};
+    avcodec_parameters_from_context(rec_stream->codecpar, rec_enc_ctx);
+    rec_stream->time_base = rec_enc_ctx->time_base;
+
+    // BGRA -> YUV420P 转换器
+    rec_sws = sws_getContext(320, 240, AV_PIX_FMT_BGRA,
+                             320, 240, AV_PIX_FMT_YUV420P,
+                             SWS_BILINEAR, NULL, NULL, NULL);
+    if (rec_sws == NULL)
+    {
+        rec_log("start: sws_getContext failed\n");
+        avcodec_free_context(&rec_enc_ctx);
+        avformat_free_context(rec_ctx);
+        rec_ctx = NULL;
+        rec_stream = NULL;
+        return false;
+    }
+    rec_yuv = av_frame_alloc();
+    if (rec_yuv == NULL)
+    {
+        rec_log("start: av_frame_alloc failed\n");
+        sws_freeContext(rec_sws);
+        rec_sws = NULL;
+        avcodec_free_context(&rec_enc_ctx);
+        avformat_free_context(rec_ctx);
+        rec_ctx = NULL;
+        rec_stream = NULL;
+        return false;
+    }
+    rec_yuv->format = AV_PIX_FMT_YUV420P;
+    rec_yuv->width = 320;
+    rec_yuv->height = 240;
+    if (av_frame_get_buffer(rec_yuv, 0) < 0)
+    {
+        rec_log("start: frame_get_buffer failed\n");
+        av_frame_free(&rec_yuv);
+        sws_freeContext(rec_sws);
+        rec_sws = NULL;
+        avcodec_free_context(&rec_enc_ctx);
+        avformat_free_context(rec_ctx);
+        rec_ctx = NULL;
+        rec_stream = NULL;
+        return false;
+    }
 
     if (!(rec_ctx->oformat->flags & AVFMT_NOFILE))
     {
         if (avio_open(&rec_ctx->pb, filename, AVIO_FLAG_WRITE) < 0)
         {
             rec_log("start: avio_open failed\n");
+            av_frame_free(&rec_yuv);
+            sws_freeContext(rec_sws);
+            rec_sws = NULL;
+            avcodec_free_context(&rec_enc_ctx);
             avformat_free_context(rec_ctx);
             rec_ctx = NULL;
+            rec_stream = NULL;
             return false;
         }
     }
@@ -332,8 +419,13 @@ bool codec_startProcessedRecording(const char *filename, int width, int height)
         rec_log("start: write_header failed ret=%d\n", ret);
         if (!(rec_ctx->oformat->flags & AVFMT_NOFILE))
             avio_closep(&rec_ctx->pb);
+        av_frame_free(&rec_yuv);
+        sws_freeContext(rec_sws);
+        rec_sws = NULL;
+        avcodec_free_context(&rec_enc_ctx);
         avformat_free_context(rec_ctx);
         rec_ctx = NULL;
+        rec_stream = NULL;
         return false;
     }
 
@@ -343,6 +435,10 @@ bool codec_startProcessedRecording(const char *filename, int width, int height)
         rec_log("start: av_packet_alloc failed\n");
         if (!(rec_ctx->oformat->flags & AVFMT_NOFILE))
             avio_closep(&rec_ctx->pb);
+        av_frame_free(&rec_yuv);
+        sws_freeContext(rec_sws);
+        rec_sws = NULL;
+        avcodec_free_context(&rec_enc_ctx);
         avformat_free_context(rec_ctx);
         rec_ctx = NULL;
         rec_stream = NULL;
@@ -366,6 +462,10 @@ bool codec_startProcessedRecording(const char *filename, int width, int height)
         pthread_mutex_unlock(&rec_frame_mutex);
         if (!(rec_ctx->oformat->flags & AVFMT_NOFILE))
             avio_closep(&rec_ctx->pb);
+        av_frame_free(&rec_yuv);
+        sws_freeContext(rec_sws);
+        rec_sws = NULL;
+        avcodec_free_context(&rec_enc_ctx);
         avformat_free_context(rec_ctx);
         rec_ctx = NULL;
         rec_stream = NULL;
@@ -388,14 +488,8 @@ void codec_writeProcessedFrame(const uint8_t *bgra)
         return;
     }
 
-    // BGRA -> RGBA（tiny_jpeg 只支持 RGB/RGBA 顺序）
-    for (int i = 0; i < 320 * 240; i++)
-    {
-        rec_rgba[i * 4 + 0] = bgra[i * 4 + 2];
-        rec_rgba[i * 4 + 1] = bgra[i * 4 + 1];
-        rec_rgba[i * 4 + 2] = bgra[i * 4 + 0];
-        rec_rgba[i * 4 + 3] = bgra[i * 4 + 3];
-    }
+    // 直接拷贝 BGRA，色彩空间/像素格式转换在编码线程里用 sws 完成
+    memcpy(rec_bgra, bgra, 320 * 240 * 4);
 
     rec_frame_pending = true;
     pthread_cond_signal(&rec_frame_cond);
@@ -417,11 +511,25 @@ void codec_stopProcessedRecording()
 
     pthread_join(rec_thread, NULL);
 
+    // 冲刷编码器缓冲区里剩余的帧
+    rec_encode_and_write(NULL);
+
     rec_log("stop: frames=%d pts=%lld\n", rec_write_count, (long long)rec_pts);
     int ret = av_write_trailer(rec_ctx);
     rec_log("stop: write_trailer ret=%d\n", ret);
     if (!(rec_ctx->oformat->flags & AVFMT_NOFILE))
         avio_closep(&rec_ctx->pb);
+
+    if (rec_yuv != NULL)
+        av_frame_free(&rec_yuv);
+    if (rec_sws != NULL)
+    {
+        sws_freeContext(rec_sws);
+        rec_sws = NULL;
+    }
+    if (rec_enc_ctx != NULL)
+        avcodec_free_context(&rec_enc_ctx);
+
     avformat_free_context(rec_ctx);
     rec_ctx = NULL;
     rec_stream = NULL;
