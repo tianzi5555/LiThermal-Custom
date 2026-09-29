@@ -528,6 +528,9 @@ static void hidden_gallery_normalize()
     char src[512];
     char thumb[128];
     char dstvid[128];
+    // 保持宽高比缩放到 320x240 内，再用黑边补齐，避免拉伸变形/裁剪放大
+    const char *vf_fit = "scale=320:240:force_original_aspect_ratio=decrease,"
+                         "pad=320:240:(ow-iw)/2:(oh-ih)/2:color=black";
     for (int i = 0; i < n; ++i)
     {
         int id = hidden_next_cap_id();
@@ -537,35 +540,28 @@ static void hidden_gallery_normalize()
         if (is_video_ext(pending[i]))
         {
             snprintf(dstvid, sizeof(dstvid), "%s/CAP%05d.mp4", GALLERY2_PATH, id);
-            // 抽首帧做缩略图
+            // 抽首帧做缩略图（保持宽高比 + 黑边）
             snprintf(cmd, sizeof(cmd),
-                     "ffmpeg -y -i '%s' -vframes 1 -vf scale=320:240 '%s' >/dev/null 2>&1",
-                     src, thumb);
+                     "ffmpeg -y -i '%s' -vframes 1 -vf \"%s\" '%s' >/dev/null 2>&1",
+                     src, vf_fit, thumb);
             system(cmd);
-            // 原视频重命名为 CAPxxxxx.mp4（若非 mp4 则转码）
-            if (has_ext(pending[i], "mp4"))
+            // 统一重新编码成 320x240 的 mp4（保持宽高比 + 黑边），
+            // 这样播放器按 320x240 显示，不会裁剪放大或变形
+            snprintf(cmd, sizeof(cmd),
+                     "ffmpeg -y -i '%s' -vf \"%s\" -c:v mpeg4 -q:v 5 -an '%s' >/dev/null 2>&1",
+                     src, vf_fit, dstvid);
+            if (system(cmd) == 0)
             {
-                snprintf(cmd, sizeof(cmd), "mv '%s' '%s'", src, dstvid);
+                snprintf(cmd, sizeof(cmd), "rm -f '%s'", src);
                 system(cmd);
-            }
-            else
-            {
-                snprintf(cmd, sizeof(cmd),
-                         "ffmpeg -y -i '%s' -c:v mpeg4 -q:v 5 -an '%s' >/dev/null 2>&1",
-                         src, dstvid);
-                if (system(cmd) == 0)
-                {
-                    snprintf(cmd, sizeof(cmd), "rm -f '%s'", src);
-                    system(cmd);
-                }
             }
         }
         else // 图片
         {
-            // 缩放成 320x240 的 jpeg 当作照片
+            // 缩放到 320x240 内（保持宽高比 + 黑边）当作照片
             snprintf(cmd, sizeof(cmd),
-                     "ffmpeg -y -i '%s' -vf scale=320:240 '%s' >/dev/null 2>&1",
-                     src, thumb);
+                     "ffmpeg -y -i '%s' -vf \"%s\" '%s' >/dev/null 2>&1",
+                     src, vf_fit, thumb);
             if (system(cmd) == 0)
             {
                 snprintf(cmd, sizeof(cmd), "rm -f '%s'", src);
