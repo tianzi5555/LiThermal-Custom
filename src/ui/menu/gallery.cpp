@@ -60,7 +60,7 @@ static photo_type_t getPhotoType(int id)
     sprintf(filename_buffer, GALLERY_PATH "/CAP%05d.raw", id);
     if (stat(filename_buffer, &s) == 0)
         return PHOTO_TYPE_RAW_CAPTURE;
-    sprintf(filename_buffer, GALLERY_PATH "/CAP%05d.mjpeg", id);
+    sprintf(filename_buffer, GALLERY_PATH "/CAP%05d.mp4", id);
     if (stat(filename_buffer, &s) == 0)
         return PHOTO_TYPE_VIDEO;
     return PHOTO_TYPE_SCREENSHOT;
@@ -327,7 +327,7 @@ static void full_screen_show(int id)
         lv_obj_del(ffmpeg_fullscreen);
     if (type == PHOTO_TYPE_VIDEO)
     {
-        sprintf(file_name_buffer, GALLERY_PATH "/CAP%05d.mjpeg", id);
+        sprintf(file_name_buffer, GALLERY_PATH "/CAP%05d.mp4", id);
         ffmpeg_fullscreen = lv_ffmpeg_player_create(lv_layer_top());
         lv_ffmpeg_player_set_src(ffmpeg_fullscreen, file_name_buffer);
         lv_ffmpeg_player_set_cmd(ffmpeg_fullscreen, LV_FFMPEG_PLAYER_CMD_START);

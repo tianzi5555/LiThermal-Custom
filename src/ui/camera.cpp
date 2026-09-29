@@ -102,7 +102,7 @@ void camera_record_toggle_dump_stream()
             return;
         }
         cameraUtils.readJpegWithExtra(name_partial);
-        sprintf(file_name_buffer, "%s.mjpeg", name_partial);
+        sprintf(file_name_buffer, "%s.mp4", name_partial);
         if (!codec_startProcessedRecording(file_name_buffer, 320, 240))
         {
             camlog("toggle: startProcessedRecording failed for %s\n", file_name_buffer);

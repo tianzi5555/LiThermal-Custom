@@ -34,7 +34,7 @@ void codec_enablePacketDumping(bool en, const char *dump_target);
 AVFrame *codec_getFrame();
 
 /**
- * @brief 录制处理后的画面（数码变焦/对比度之后）为 MJPEG 文件
+ * @brief 录制处理后的画面（数码变焦/对比度之后）为 MP4 文件
  */
 bool codec_startProcessedRecording(const char *filename, int width, int height);
 void codec_writeProcessedFrame(const uint8_t *bgra);
