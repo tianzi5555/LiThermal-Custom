@@ -56,7 +56,7 @@ static void lv_ui_poweroff()
         if (animation_opa > 255)
             animation_opa = 255;
         lv_obj_set_style_opa(blackOverlay, animation_opa, 0);
-        lv_label_set_text_fmt(lbl_power_off_prompt, "长按 %d 秒后关机", ((255 - animation_opa) >> 6) + 1);
+        lv_label_set_text_fmt(lbl_power_off_prompt, "长按 %d 秒后关机", ((255 - animation_opa) >> 7) + 1);
         if (poweroff_started)
         {
             if (animation_opa == 255)
@@ -69,7 +69,7 @@ static void lv_ui_poweroff()
             }
             else
             {
-                animation_opa += 2;
+                animation_opa += 6;
             }
         }
         else
