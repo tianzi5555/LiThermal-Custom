@@ -60,6 +60,21 @@ jobs:
             echo "bw21/example 不存在，用官方例程原样编译"
           fi
 
+      - name: 生成 WiFi 引导凭据（来自 Secrets，日志里会被打码）
+        env:
+          GW_SSID: ${{ secrets.WIFI_SSID }}
+          GW_PSK: ${{ secrets.WIFI_PSK }}
+        run: |
+          EXAMPLE="${{ github.event.inputs.example }}"
+          if [ -z "$EXAMPLE" ]; then EXAMPLE="li_thermal_gw"; fi
+          if [ -n "$GW_SSID" ]; then
+            printf '#pragma once\n#define GW_BOOT_SSID "%s"\n#define GW_BOOT_PSK "%s"\n' "$GW_SSID" "$GW_PSK" \
+              > "sdk/component/example/$EXAMPLE/gw_secrets.h"
+            echo "已生成 gw_secrets.h（$EXAMPLE），长度 SSID=${#GW_SSID}"
+          else
+            echo "没配置 WIFI_SSID secret，跳过引导凭据"
+          fi
+
       - name: 给 lwIP 打补丁（代理 ARP + 主机路由 + IP_FORWARD）
         run: |
           python3 bw21/tools/apply_patches.py sdk

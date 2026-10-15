@@ -110,6 +110,20 @@ static SemaphoreHandle_t cdc_ecm_detach_sema;
 /* ------------------------------------------------------------------ 日志 */
 #define GW_LOG(fmt, ...) printf("[LiGW] " fmt "\n", ##__VA_ARGS__)
 
+/* 引导 WiFi 凭据：由 CI 从 GitHub Secrets 生成 gw_secrets.h（不进仓库）。
+   相机还没把密码送过来时，BW21 自己先连上，便于从电脑侧直接验证整条链路。 */
+#if defined(__has_include)
+#  if __has_include("gw_secrets.h")
+#    include "gw_secrets.h"
+#  endif
+#endif
+#ifndef GW_BOOT_SSID
+#define GW_BOOT_SSID ""
+#endif
+#ifndef GW_BOOT_PSK
+#define GW_BOOT_PSK ""
+#endif
+
 /* ================================================================== 代理 ARP / 主机路由
  * 这两个函数被打了补丁的 lwIP 调用（见 bw21/tools/apply_patches.py）：
  *   etharp.c : etharp_input() 里问 li_gw_proxy_arp()
@@ -176,9 +190,18 @@ static int cdc_ecm_cb_detach(void)
 	return HAL_OK;
 }
 
+static u32 s_ecm_rx_pkts = 0;
+static u32 s_ecm_rx_bytes = 0;
+
 static int cdc_ecm_cb_bulk_receive(u8 *buf, u32 len)
 {
 	if (len > 0) {
+		s_ecm_rx_pkts++;
+		s_ecm_rx_bytes += len;
+		if (s_ecm_rx_pkts <= 12 || (s_ecm_rx_pkts % 25) == 0) {
+			GW_LOG("ECM RX #%lu len=%lu total=%lu", (unsigned long)s_ecm_rx_pkts, (unsigned long)len,
+				   (unsigned long)s_ecm_rx_bytes);
+		}
 		usbh_ecm_rx_buf = buf;
 		ethernetif_mii_recv(&xnetif[ETHERNET_IDX], (int)len);
 	}
@@ -243,6 +266,16 @@ s8 rltk_mii_send(struct eth_drv_sg *sg_list, int sg_len, int total_len)
 		pdata += sg_list->len;
 	}
 	ret = usbh_cdc_ecm_send_data(usbh_ecm_tx_buf, (u32)total_len, 1);
+	{
+		static u32 tx_pkts = 0;
+		static u32 tx_bytes = 0;
+		tx_pkts++;
+		tx_bytes += (u32)total_len;
+		if (tx_pkts <= 12 || (tx_pkts % 25) == 0) {
+			GW_LOG("ECM TX #%lu len=%d ret=%d total=%lu", (unsigned long)tx_pkts, total_len, (int)ret,
+				   (unsigned long)tx_bytes);
+		}
+	}
 	return (ret == HAL_OK) ? 0 : -1;
 }
 
@@ -491,6 +524,17 @@ static void gw_wifi_task(void *param)
 	} else {
 		GW_LOG("wifi_on ok");
 	}
+	/* 引导凭据：等 20 秒，相机要是还没把密码送过来，就自己先连上 */
+	if (GW_BOOT_SSID[0] != 0) {
+		vTaskDelay(pdMS_TO_TICKS(20000));
+		if (s_ssid[0] == 0) {
+			GW_LOG("boot creds: 相机没送密码，自己连 '%s'", GW_BOOT_SSID);
+			snprintf(s_ssid, sizeof(s_ssid), "%s", GW_BOOT_SSID);
+			snprintf(s_pass, sizeof(s_pass), "%s", GW_BOOT_PSK);
+			gw_wifi_connect_now();
+		}
+	}
+
 	for (;;) {
 		if (s_want_disconnect) {
 			s_want_disconnect = 0;
@@ -610,6 +654,7 @@ static void gw_http_handle(int sock)
 		gw_http_send(sock, 400, "{\"ok\":0}");
 		return;
 	}
+	GW_LOG("HTTP %s %s（收到相机请求）", method, path);
 	body = strstr(req, "\r\n\r\n");
 	if (body) {
 		body += 4;
