@@ -118,6 +118,29 @@ jobs:
             echo "=== usbh_cdc_ecm 头文件 API ==="
             grep -n "usbh_cdc_ecm_\|usbh_start\|usbh_init\|usbh_config" sdk/component/usb/usb_stack/v1.0.0/host/cdc_ecm/usbh_cdc_ecm.h sdk/component/usb/usb_stack/v1.0.0/host/core/usbh.h 2>/dev/null | head -60
           } > $OUT/api_hints.txt 2>&1
+          mkdir -p $OUT/wifi_api $OUT/proj_app $OUT/net_httpd $OUT/lwip_opts
+          cp sdk/component/wifi/api/*.h $OUT/wifi_api/ 2>/dev/null || true
+          cp sdk/component/wifi/*.h $OUT/wifi_api/ 2>/dev/null || true
+          cp -r sdk/project/realtek_amebapro2_v0_example/GCC-RELEASE/application/*.c $OUT/proj_app/ 2>/dev/null || true
+          cp -r sdk/project/realtek_amebapro2_v0_example/GCC-RELEASE/application/*.h $OUT/proj_app/ 2>/dev/null || true
+          cp -r sdk/component/network/httpd/* $OUT/net_httpd/ 2>/dev/null || true
+          cp sdk/component/lwip/api/lwipopts*.h $OUT/lwip_opts/ 2>/dev/null || true
+          cp -r sdk/component/example/http_client $OUT/ 2>/dev/null || true
+          cp -r sdk/component/example/wlan_scenario $OUT/ 2>/dev/null || true
+          {
+            echo "=== 谁定义了 main / 谁调用 app_example ==="
+            grep -rn "app_example\|int main" sdk/project/realtek_amebapro2_v0_example/GCC-RELEASE/application/*.c | head -20
+            echo "=== wifi 初始化/连接/扫描 典型调用 ==="
+            grep -rn "wifi_on\|wifi_connect\|wifi_scan_networks\|wifi_get_join_status\|rtw_scan_param_t\|scan_user_callback\|scan_buf" sdk/component/example/http_client/*.c sdk/component/example/wlan_scenario/*.c 2>/dev/null | head -40
+            echo "=== wifi_conf.h 关键结构/API ==="
+            grep -n "typedef struct\|wifi_scan_networks\|wifi_connect\|rtw_network_info_t\|rtw_scan_param_t\|rtw_scan_result_t\|rtw_scan_handler_result_t\|security\|signal_strength\|SSID" sdk/component/wifi/api/wifi_conf.h 2>/dev/null | head -60
+            echo "=== httpd API ==="
+            grep -n "httpd_\|typedef.*httpd\|HTTPD" sdk/component/network/httpd/httpd.h 2>/dev/null | head -30
+            echo "=== lwipopts.h 里 IP_FORWARD ==="
+            grep -n "IP_FORWARD\|LWIP_IPV4\|MEMP_NUM\|LWIP_DHCP\|LWIP_ARP" sdk/component/lwip/api/lwipopts.h 2>/dev/null | head -30
+            echo "=== platform_opts.h CONFIG 宏 ==="
+            grep -rn "CONFIG_ETHERNET\|CONFIG_WLAN" sdk/component/*/api/platform_opts.h sdk/component/**/platform_opts.h 2>/dev/null | head -10
+          } > $OUT/api_hints2.txt 2>&1
           du -sh $OUT
           tar -czf sdk_dump.tar.gz $OUT
           ls -l sdk_dump.tar.gz
