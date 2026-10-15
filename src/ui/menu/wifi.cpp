@@ -461,7 +461,7 @@ void menu_wifi_show(void)
     lbl_status = lv_label_create(root);
     lv_obj_set_pos(lbl_status, 2, 18);
     lv_obj_set_width(lbl_status, WIFI_CARD_W - 24);
-    lv_label_set_long_mode(lbl_status, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    lv_label_set_long_mode(lbl_status, LV_LABEL_LONG_WRAP);
     lv_label_set_text(lbl_status, "正在检测网络后端 ...");
     lv_obj_set_style_text_font(lbl_status, &ui_font_cn16, LV_PART_MAIN | LV_STATE_DEFAULT);
 
