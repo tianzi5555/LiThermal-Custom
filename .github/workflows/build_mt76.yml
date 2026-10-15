@@ -1,15 +1,10 @@
 name: Build mt76 (MT7612U) kernel modules for LiThermal camera
 
-# 给 LiThermal 热成像相机（T113-S3 / Tina Linux 5.4.61）编译 MT7612U 的 WiFi 驱动模块。
-#
-# 依据（全部实测自相机）：
-#   * uname -r = 5.4.61，编译器 arm-openwrt-linux-muslgnueabi-gcc 6.4.1
-#   * CONFIG_MODVERSIONS 未开 → 不需要符号 CRC
-#   * CONFIG_MODULE_SIG 未开 → 不需要模块签名
-#   * CONFIG_CFG80211=y（内建）、CONFIG_MAC80211 未开 → mac80211 需要一起编成模块
-#   * CONFIG_RFKILL=y、CRYPTO_CCM/AES/ARC4=y ✓
-# 因此只要内核版本串一致（5.4.61 SMP PREEMPT），编出来的 .ko 就能直接 insmod。
-
+# 缁?LiThermal 鐑垚鍍忕浉鏈猴紙T113-S3 / Tina Linux 5.4.61锛夌紪璇?MT7612U 鐨?WiFi 椹卞姩妯″潡銆?#
+# 渚濇嵁锛堝叏閮ㄥ疄娴嬭嚜鐩告満锛夛細
+#   * uname -r = 5.4.61锛岀紪璇戝櫒 arm-openwrt-linux-muslgnueabi-gcc 6.4.1
+#   * CONFIG_MODVERSIONS 鏈紑 鈫?涓嶉渶瑕佺鍙?CRC
+#   * CONFIG_MODULE_SIG 鏈紑 鈫?涓嶉渶瑕佹ā鍧楃鍚?#   * CONFIG_CFG80211=y锛堝唴寤猴級銆丆ONFIG_MAC80211 鏈紑 鈫?mac80211 闇€瑕佷竴璧风紪鎴愭ā鍧?#   * CONFIG_RFKILL=y銆丆RYPTO_CCM/AES/ARC4=y 鉁?# 鍥犳鍙鍐呮牳鐗堟湰涓蹭竴鑷达紙5.4.61 SMP PREEMPT锛夛紝缂栧嚭鏉ョ殑 .ko 灏辫兘鐩存帴 insmod銆?
 on:
   workflow_dispatch:
   push:
@@ -23,84 +18,83 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 90
     steps:
-      - name: 取出本仓库
-        uses: actions/checkout@v4
+      - name: 鍙栧嚭鏈粨搴?        uses: actions/checkout@v4
 
-      - name: 安装依赖
+      - name: 瀹夎渚濊禆
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq build-essential bc bison flex libssl-dev libelf-dev \
             libncurses5-dev rsync cpio kmod python3 wget xz-utils
 
-      - name: 拉取交叉工具链（与相机内核同款 gcc 6.4.1 musl）
-        run: |
+      - name: 鎷夊彇浜ゅ弶宸ュ叿閾撅紙涓庣浉鏈哄唴鏍稿悓娆?gcc 6.4.1 musl锛?        run: |
           git clone --depth 1 https://github.com/diylxy/LiThermal_Compiler.git tc
           ls tc/toolchain-sunxi-musl/toolchain/bin | head -5
           test -x tc/toolchain-sunxi-musl/toolchain/bin/arm-openwrt-linux-muslgnueabi-gcc.bin \
-            && echo "工具链 OK" || echo "警告：未找到 gcc 实体文件"
+            && echo "宸ュ叿閾?OK" || echo "璀﹀憡锛氭湭鎵惧埌 gcc 瀹炰綋鏂囦欢"
 
-      - name: 拉取内核源码（T113 Tina Linux 5.4.61）
-        run: |
+      - name: 鎷夊彇鍐呮牳婧愮爜锛圱113 Tina Linux 5.4.61锛?        run: |
           git clone --depth 1 https://github.com/Noooooob233/tina-d1-linux-5.4.git linux
           cd linux
           head -5 Makefile
           grep -E '^(VERSION|PATCHLEVEL|SUBLEVEL) =' Makefile
-          # 关键：内核树是 git 仓库且会被我们改动 → setlocalversion 会加 "+"，
-          # 导致 vermagic 变成 5.4.61+ 而相机是 5.4.61（insmod 会被拒）。
-          # 放一个空的 .scmversion 就能让它不再追加任何东西。
-          touch .scmversion
-          echo "已放置 .scmversion（消除 vermagic 的 + 后缀）"
+          # 鍏抽敭锛氬唴鏍告爲鏄?git 浠撳簱涓斾細琚垜浠敼鍔?鈫?setlocalversion 浼氬姞 "+"锛?          # 瀵艰嚧 vermagic 鍙樻垚 5.4.61+ 鑰岀浉鏈烘槸 5.4.61锛坕nsmod 浼氳鎷掞級銆?          # 鏀句竴涓┖鐨?.scmversion 灏辫兘璁╁畠涓嶅啀杩藉姞浠讳綍涓滆タ銆?          touch .scmversion
+          echo "宸叉斁缃?.scmversion锛堟秷闄?vermagic 鐨?+ 鍚庣紑锛?
 
-      - name: 套用相机内核配置并打开 mt76/mac80211
+      - name: 濂楃敤鐩告満鍐呮牳閰嶇疆骞舵墦寮€ mt76/mac80211
         run: |
           set -e
           export PATH="$GITHUB_WORKSPACE/tc/toolchain-sunxi-musl/toolchain/bin:$PATH"
           export ARCH=arm
           export CROSS_COMPILE=arm-openwrt-linux-muslgnueabi-
+          export STAGING_DIR="$GITHUB_WORKSPACE/tc/target"
           echo "=== 工具链自检 ==="
           ls -l "$GITHUB_WORKSPACE/tc/toolchain-sunxi-musl/toolchain/bin" | grep -E 'gcc|wrapper' | head -8
-          ${CROSS_COMPILE}gcc --version | head -2 || echo "!! gcc 跑不起来"
+          ${CROSS_COMPILE}gcc --version | head -2 || echo "!! gcc 璺戜笉璧锋潵"
           cd linux
           cp "$GITHUB_WORKSPACE/.github/kernel/t113_kernel.config" .config
-          # 要让 mediatek 的 mt76 出现在 Kconfig 里，必须先打开无线厂商开关，
-          # 否则 scripts/config 写的 CONFIG_MT76x2U 会被 olddefconfig 丢掉。
-          ./scripts/config --enable WLAN_VENDOR_MEDIATEK
+          # 绗竴閬嶏細鍏堟妸 WLAN_VENDOR_MEDIATEK 鎵撳紑骞?olddefconfig锛?          # 杩欐牱 mediatek/mt76 鐨?Kconfig 鎵嶈 source 杩涙潵锛屼笅闈㈠啓 MT76x2U 鎵嶆湁鏁堛€?          ./scripts/config --enable WLAN_VENDOR_MEDIATEK
           ./scripts/config --enable WLAN_VENDOR_REALTEK || true
           ./scripts/config --module MAC80211
-          ./scripts/config --module MT76
+          make ARCH=arm CROSS_COMPILE=$CROSS_COMPILE olddefconfig
+          echo "=== 绗竴閬嶄箣鍚庯細mediatek/mt76 鐩稿叧绗﹀彿 ==="
+          grep -E '^(CONFIG_WLAN_VENDOR_MEDIATEK|CONFIG_MAC80211|CONFIG_MT76|CONFIG_USB)=|^# CONFIG_MT76' .config || true
+          # 绗簩閬嶏細鐜板湪 MT76x2U / MT76x2_COMMON 鎵嶆槸鍙缃殑绗﹀彿
           ./scripts/config --module MT76x2U
-          ./scripts/config --module MT76x0U
           ./scripts/config --module MT76x2_COMMON
+          ./scripts/config --module MT76x02_USB
+          ./scripts/config --module MT76_USB
+          ./scripts/config --module MT76_CORE
+          ./scripts/config --module MT76x0U
           ./scripts/config --module CRC_CCITT || true
           ./scripts/config --module CRYPTO_MICHAEL_MIC || true
           ./scripts/config --module AVERAGE || true
           ./scripts/config --module CRYPTO_GCM || true
           make ARCH=arm CROSS_COMPILE=$CROSS_COMPILE olddefconfig
-          echo "=== 关键项确认 ==="
-          grep -E '^CONFIG_(WLAN_VENDOR_MEDIATEK|MAC80211|MT76|MT76x2U|MT76x2_COMMON|CFG80211|RFKILL)=' .config || true
+          echo "=== 鍏抽敭椤圭‘璁?==="
+          grep -E '^(CONFIG_WLAN_VENDOR_MEDIATEK|CONFIG_MAC80211|CONFIG_MT76|CONFIG_MT76x2_COMMON|CONFIG_CFG80211|CONFIG_RFKILL)=' .config || true
           grep -E '^CONFIG_MODVERSIONS|^CONFIG_MODULE_SIG' .config || true
-          # 自检：必须真的要到了这几个 =m，否则直接失败，不产出空包
-          for k in CONFIG_MAC80211 CONFIG_MT76 CONFIG_MT76x2U; do
+          # 鑷锛氬繀椤荤湡鐨勮鍒颁簡杩欏嚑涓?=m锛堟敞鎰忔湰鍐呮牳绗﹀彿鍚嶆槸 MT76_CORE / MT76x2U锛?          for k in CONFIG_MAC80211 CONFIG_MT76_CORE CONFIG_MT76x2U; do
             if ! grep -q "^$k=m" .config; then
-              echo "!! $k 没有变成 =m，Kconfig 依赖没满足"; exit 1
+              echo "!! $k 娌℃湁鍙樻垚 =m"; echo "--- 褰撳墠 MT76 鐩稿叧锛?; grep -E 'MT76' .config || true; exit 1
             fi
           done
-          echo "配置自检通过 ✔"
+          echo "閰嶇疆鑷閫氳繃 鉁?
 
-      - name: 编译内核模块
+      - name: 缂栬瘧鍐呮牳妯″潡
         run: |
           set -o pipefail
           export PATH="$GITHUB_WORKSPACE/tc/toolchain-sunxi-musl/toolchain/bin:$PATH"
           export ARCH=arm
           export CROSS_COMPILE=arm-openwrt-linux-muslgnueabi-
           export STAGING_DIR="$GITHUB_WORKSPACE/tc/target"
+          echo "=== 工具链自检 ==="
           which ${CROSS_COMPILE}gcc || ls -l tc/toolchain-sunxi-musl/toolchain/bin | head
           cd linux
           make -j"$(nproc)" modules 2>&1 | tail -80
-          echo "=== 找出来的 .ko ==="
+          echo "=== 鎵惧嚭鏉ョ殑 .ko ==="
           find . -name 'mac80211.ko' -o -name 'mt76*.ko' -o -name 'mt7601u.ko' -o -name 'crc-ccitt.ko' -o -name 'michael_mic.ko' | sort
 
-      - name: 收集产物 + 打印 vermagic
+      - name: 鏀堕泦浜х墿 + 鎵撳嵃 vermagic
         run: |
           set -e
           mkdir -p out
@@ -113,24 +107,23 @@ jobs:
           done
           cd "$GITHUB_WORKSPACE/out"
           ls -l
-          # 核心自检：mt76x2u.ko 必须在
-          if [ ! -f mt76x2u.ko ]; then echo "!! 没编出 mt76x2u.ko"; exit 1; fi
+          # 鏍稿績鑷锛歮t76x2u.ko 蹇呴』鍦?          if [ ! -f mt76x2u.ko ]; then echo "!! 娌＄紪鍑?mt76x2u.ko"; exit 1; fi
           for k in *.ko; do
             echo "--- $k"
             modinfo "$k" 2>/dev/null | grep -E '^(version|vermagic|depends|name):' || true
           done
-          echo "=== vermagic 必须恰好是：5.4.61 SMP preempt mod_unload ARMv7 p2v8 ==="
+          echo "=== vermagic 蹇呴』鎭板ソ鏄細5.4.61 SMP preempt mod_unload ARMv7 p2v8 ==="
           bad=0
           for k in *.ko; do
             v=$(modinfo -F vermagic "$k" 2>/dev/null || true)
             case "$v" in
-              "5.4.61 SMP preempt mod_unload ARMv7 p2v8"*) echo "  $k  ✔ $v" ;;
-              *) echo "  $k  ✗ $v"; bad=1 ;;
+              "5.4.61 SMP preempt mod_unload ARMv7 p2v8"*) echo "  $k  鉁?$v" ;;
+              *) echo "  $k  鉁?$v"; bad=1 ;;
             esac
           done
-          [ "$bad" = "0" ] || { echo "!! 有模块 vermagic 不匹配"; exit 1; }
+          [ "$bad" = "0" ] || { echo "!! 鏈夋ā鍧?vermagic 涓嶅尮閰?; exit 1; }
 
-      - name: 上传模块
+      - name: 涓婁紶妯″潡
         uses: actions/upload-artifact@v4
         with:
           name: mt76-modules
