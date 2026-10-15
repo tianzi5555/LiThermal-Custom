@@ -226,8 +226,7 @@ static void scan_local(void)
 
 static int write_wpa_network(const char *ssid, const char *pass)
 {
-    FILE *f = fopen(WPA_CONF_PATH, "w");
-    if (!f)
+    FILE *f = fopen(WPA_CONF_PATH, "w");    if (!f)
         return -1;
     fprintf(f, "ctrl_interface=%s\nupdate_config=1\n", WPA_CTRL_DIR);
     fprintf(f, "network={\n\tssid=\"%s\"\n", ssid);
@@ -239,6 +238,8 @@ static int write_wpa_network(const char *ssid, const char *pass)
     fclose(f);
     return 0;
 }
+
+static void status_local(void); // 见下（connect_local 里要用）
 
 static void connect_local(const char *ssid, const char *pass)
 {
