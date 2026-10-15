@@ -49,6 +49,12 @@ jobs:
       - name: 套用相机内核配置并打开 mt76/mac80211
         run: |
           set -e
+          export PATH="$GITHUB_WORKSPACE/tc/toolchain-sunxi-musl/toolchain/bin:$PATH"
+          export ARCH=arm
+          export CROSS_COMPILE=arm-openwrt-linux-muslgnueabi-
+          echo "=== 工具链自检 ==="
+          ls -l "$GITHUB_WORKSPACE/tc/toolchain-sunxi-musl/toolchain/bin" | grep -E 'gcc|wrapper' | head -8
+          ${CROSS_COMPILE}gcc --version | head -2 || echo "!! gcc 跑不起来"
           cd linux
           cp "$GITHUB_WORKSPACE/.github/kernel/t113_kernel.config" .config
           # 需要的模块（依赖由 olddefconfig 自动补齐，缺什么就补什么模块）
@@ -62,7 +68,7 @@ jobs:
           ./scripts/config --module CRYPTO_MICHAEL_MIC || true
           ./scripts/config --module AVERAGE || true
           ./scripts/config --module CRYPTO_GCM || true
-          make ARCH=arm CROSS_COMPILE=arm-openwrt-linux-muslgnueabi- olddefconfig
+          make ARCH=arm CROSS_COMPILE=$CROSS_COMPILE olddefconfig
           echo "=== 关键项确认 ==="
           grep -E '^CONFIG_(MAC80211|MT76|MT76x2U|CFG80211|RFKILL)=' .config || true
           grep -E '^CONFIG_MODVERSIONS|^CONFIG_MODULE_SIG' .config || true
