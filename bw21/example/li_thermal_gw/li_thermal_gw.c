@@ -565,6 +565,13 @@ static int gw_http_read_request(int sock, char *buf, int buflen)
 	int n;
 	char *hdr_end;
 	int content_len = 0;
+	struct timeval tv;
+
+	/* 必须设接收超时：这是单线程 accept 循环，一个「连上但不发数据」的连接
+	   会把整个控制 API 卡死（相机那边表现就是「找不到 BW21」） */
+	tv.tv_sec = 3;
+	tv.tv_usec = 0;
+	lwip_setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
 	while (total < buflen - 1) {
 		n = lwip_recv(sock, buf + total, buflen - 1 - total, 0);
@@ -793,8 +800,12 @@ static void gw_http_task(void *param)
 			vTaskDelay(pdMS_TO_TICKS(100));
 			continue;
 		}
+		GW_LOG("HTTP 连接来自 %d.%d.%d.%d:%d", (caddr.sin_addr.s_addr) & 0xFF,
+			   (caddr.sin_addr.s_addr >> 8) & 0xFF, (caddr.sin_addr.s_addr >> 16) & 0xFF,
+			   (caddr.sin_addr.s_addr >> 24) & 0xFF, ntohs(caddr.sin_port));
 		gw_http_handle(c);
 		lwip_close(c);
+		GW_LOG("HTTP 处理结束");
 	}
 }
 
