@@ -11,6 +11,7 @@
 #include <pthread.h>
 #include <sys/stat.h>
 #include <ifaddrs.h>
+#include <dirent.h>
 #include <net/if.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -58,6 +59,22 @@ static void str_copy(char *dst, size_t n, const char *src)
     dst[n - 1] = 0;
 }
 
+
+/* ECM 网卡（usb*）要是没拿到我们约定的 IP，就由应用自己补上。
+   开机脚本有时配不上（网卡出现太晚等），应用一直跑着，兜底更可靠。 */
+static void net_fix_local_iface(void)
+{
+    system("for i in $(ls /sys/class/net 2>/dev/null); do "
+           "case \"$i\" in lo|usb0|wlan0|eth0|sit0) continue;; esac; "
+           "case \"$i\" in usb*) ;; *) continue;; esac; "
+           "if ! ip addr show dev \"$i\" 2>/dev/null | grep -q '192.168.2.240'; then "
+           "  ifconfig \"$i\" 192.168.2.240 netmask 255.255.255.0 up 2>/dev/null; "
+           "  route add default gw 192.168.2.250 dev \"$i\" 2>/dev/null; "
+           "  echo nameserver 192.168.2.1 > /etc/resolv.conf 2>/dev/null; "
+           "  echo \"[netfix] $i -> 192.168.2.240 (gw 192.168.2.250)\" >> /mnt/UDISK/ui.log; "
+           "fi; done");
+}
+
 // 把本机各网卡（名字=IP(状态)）拼成一行，用于屏幕/日志诊断
 static void wifi_collect_ifaces(char *out, size_t n)
 {
@@ -90,6 +107,27 @@ static void wifi_collect_ifaces(char *out, size_t n)
                                      used ? " " : "", p->ifa_name, ip[0] ? ip : "noip", flags);
     }
     freeifaddrs(ifa);
+
+    /* 再扫一遍 /sys/class/net：把没有 IPv4 的网卡也列出来（noip），
+       这样日志里能区分「网卡不存在」和「网卡在但没 IP」 */
+    {
+        DIR *d = opendir("/sys/class/net");
+        struct dirent *e;
+        if (d) {
+            while ((e = readdir(d)) != NULL) {
+                char tag[24];
+                if (e->d_name[0] == '.' || strcmp(e->d_name, "lo") == 0)
+                    continue;
+                snprintf(tag, sizeof(tag), "%s=", e->d_name);
+                if (strstr(out, tag) != NULL)
+                    continue; /* 已经列过了 */
+                if (used < n)
+                    used += (size_t)snprintf(out + used, n - used, "%s%s=noip",
+                                             used ? " " : "", e->d_name);
+            }
+            closedir(d);
+        }
+    }
     if (out[0] == 0)
         snprintf(out, n, "(no other iface)");
 }
@@ -142,9 +180,12 @@ static void probe_backend(void)
         SET_STATUS("使用本机 %s", WIFI_LOCAL_IF);
         return;
     }
-    // 3) 都没戏：把本机网卡状态一起报出来，方便在相机屏幕上一眼看出问题
+    // 3) 都没戏：先尝试自己把 ECM 网卡 IP 补上（兜底），再把状态报出来
     {
         char info[160];
+        static int fix_tick = 0;
+        if ((++fix_tick % 3) == 1)
+            net_fix_local_iface();
         wifi_collect_ifaces(info, sizeof(info));
         ui_trace("probe: 未找到后端 %s；本机网卡: %s", g_ctl, info);
         g_st.backend = WIFI_BACKEND_DEMO;
