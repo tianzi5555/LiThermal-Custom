@@ -159,6 +159,8 @@ jobs:
           path: |
             sdk/project/realtek_amebapro2_v0_example/GCC-RELEASE/build/flash_ntz.bin
             sdk/project/realtek_amebapro2_v0_example/GCC-RELEASE/build/flash_ntz.nn.bin
+            sdk/project/realtek_amebapro2_v0_example/GCC-RELEASE/build/application/*.bin
+            sdk/project/realtek_amebapro2_v0_example/GCC-RELEASE/build/application/*.json
           if-no-files-found: warn
 
       - name: 上传烧录工具（Windows 用 uartfwburn.exe）
