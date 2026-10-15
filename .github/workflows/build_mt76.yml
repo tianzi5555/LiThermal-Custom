@@ -45,6 +45,11 @@ jobs:
           cd linux
           head -5 Makefile
           grep -E '^(VERSION|PATCHLEVEL|SUBLEVEL) =' Makefile
+          # 关键：内核树是 git 仓库且会被我们改动 → setlocalversion 会加 "+"，
+          # 导致 vermagic 变成 5.4.61+ 而相机是 5.4.61（insmod 会被拒）。
+          # 放一个空的 .scmversion 就能让它不再追加任何东西。
+          touch .scmversion
+          echo "已放置 .scmversion（消除 vermagic 的 + 后缀）"
 
       - name: 套用相机内核配置并打开 mt76/mac80211
         run: |
@@ -57,21 +62,30 @@ jobs:
           ${CROSS_COMPILE}gcc --version | head -2 || echo "!! gcc 跑不起来"
           cd linux
           cp "$GITHUB_WORKSPACE/.github/kernel/t113_kernel.config" .config
-          # 需要的模块（依赖由 olddefconfig 自动补齐，缺什么就补什么模块）
+          # 要让 mediatek 的 mt76 出现在 Kconfig 里，必须先打开无线厂商开关，
+          # 否则 scripts/config 写的 CONFIG_MT76x2U 会被 olddefconfig 丢掉。
+          ./scripts/config --enable WLAN_VENDOR_MEDIATEK
+          ./scripts/config --enable WLAN_VENDOR_REALTEK || true
           ./scripts/config --module MAC80211
           ./scripts/config --module MT76
           ./scripts/config --module MT76x2U
           ./scripts/config --module MT76x0U
-          ./scripts/config --module MT7601U
-          ./scripts/config --module MAC80211_LEDS || true
+          ./scripts/config --module MT76x2_COMMON
           ./scripts/config --module CRC_CCITT || true
           ./scripts/config --module CRYPTO_MICHAEL_MIC || true
           ./scripts/config --module AVERAGE || true
           ./scripts/config --module CRYPTO_GCM || true
           make ARCH=arm CROSS_COMPILE=$CROSS_COMPILE olddefconfig
           echo "=== 关键项确认 ==="
-          grep -E '^CONFIG_(MAC80211|MT76|MT76x2U|CFG80211|RFKILL)=' .config || true
+          grep -E '^CONFIG_(WLAN_VENDOR_MEDIATEK|MAC80211|MT76|MT76x2U|MT76x2_COMMON|CFG80211|RFKILL)=' .config || true
           grep -E '^CONFIG_MODVERSIONS|^CONFIG_MODULE_SIG' .config || true
+          # 自检：必须真的要到了这几个 =m，否则直接失败，不产出空包
+          for k in CONFIG_MAC80211 CONFIG_MT76 CONFIG_MT76x2U; do
+            if ! grep -q "^$k=m" .config; then
+              echo "!! $k 没有变成 =m，Kconfig 依赖没满足"; exit 1
+            fi
+          done
+          echo "配置自检通过 ✔"
 
       - name: 编译内核模块
         run: |
@@ -93,15 +107,28 @@ jobs:
           cd linux
           for f in $(find . -name 'mac80211.ko' -o -name 'mt76*.ko' -o -name 'mt7601u.ko' \
                           -o -name 'crc-ccitt.ko' -o -name 'michael_mic.ko' -o -name 'cfg80211.ko' \
-                          -o -name 'rfkill.ko' -o -name 'lib80211*.ko'); do
-            cp "$f" "$GITHUB_WORKSPACE/out/"
+                          -o -name 'rfkill.ko' -o -name 'lib80211*.ko' -o -name 'aes*.ko' -o -name 'arc4.ko' \
+                          -o -name 'ccm.ko' -o -name 'gcm.ko' -o -name 'crypto*.ko' -o -name 'crc32*.ko'); do
+            cp "$f" "$GITHUB_WORKSPACE/out/" 2>/dev/null || true
           done
           cd "$GITHUB_WORKSPACE/out"
           ls -l
+          # 核心自检：mt76x2u.ko 必须在
+          if [ ! -f mt76x2u.ko ]; then echo "!! 没编出 mt76x2u.ko"; exit 1; fi
           for k in *.ko; do
             echo "--- $k"
-            modinfo "$k" 2>/dev/null | grep -E '^(filename|version|vermagic|depends|name):' || true
+            modinfo "$k" 2>/dev/null | grep -E '^(version|vermagic|depends|name):' || true
           done
+          echo "=== vermagic 必须恰好是：5.4.61 SMP preempt mod_unload ARMv7 p2v8 ==="
+          bad=0
+          for k in *.ko; do
+            v=$(modinfo -F vermagic "$k" 2>/dev/null || true)
+            case "$v" in
+              "5.4.61 SMP preempt mod_unload ARMv7 p2v8"*) echo "  $k  ✔ $v" ;;
+              *) echo "  $k  ✗ $v"; bad=1 ;;
+            esac
+          done
+          [ "$bad" = "0" ] || { echo "!! 有模块 vermagic 不匹配"; exit 1; }
 
       - name: 上传模块
         uses: actions/upload-artifact@v4
