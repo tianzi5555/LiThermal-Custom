@@ -6,6 +6,9 @@
 list (
     APPEND app_example_inc_path
     "${sdk_root}/component/example/${EXAMPLE}"
+    "${sdk_root}/component/network/dhcp"
+    "${sdk_root}/component/network/httpd"
+    "${sdk_root}/component/wifi/api"
 )
 
 ### add source file ###

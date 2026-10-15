@@ -63,16 +63,16 @@ def main(sdk):
     # ---------- 2. etharp.c：代理 ARP ----------
     e = os.path.join(sdk, r"component/lwip/lwip_v2.1.2/src/core/ipv4/etharp.c")
     hunk_a = (
-        "\t/* ARP packet directed to us? */\n"
-        "\tfor_us = (u8_t)ip4_addr_cmp(&dipaddr, netif_ip4_addr(netif));\n",
-        "\t/* ARP packet directed to us? */\n"
-        "\tfor_us = (u8_t)ip4_addr_cmp(&dipaddr, netif_ip4_addr(netif));\n"
+        "\t\t/* ARP packet directed to us? */\n"
+        "\t\tfor_us = (u8_t)ip4_addr_cmp(&dipaddr, netif_ip4_addr(netif));\n",
+        "\t\t/* ARP packet directed to us? */\n"
+        "\t\tfor_us = (u8_t)ip4_addr_cmp(&dipaddr, netif_ip4_addr(netif));\n"
         f"#ifdef {MARK}\n"
-        "\t/* LiThermal: 代理 ARP —— 相机挂在 ECM 口后面，要替它回答 ARP 请求 */\n"
-        "\textern int li_gw_proxy_arp(struct netif *netif, const ip4_addr_t *target);\n"
-        "\tif (!for_us && li_gw_proxy_arp(netif, &dipaddr)) {\n"
-        "\t\tfor_us = 1;\n"
-        "\t}\n"
+        "\t\t/* LiThermal: 代理 ARP —— 相机挂在 ECM 口后面，要替它回答 ARP 请求 */\n"
+        "\t\textern int li_gw_proxy_arp(struct netif *netif, const ip4_addr_t *target);\n"
+        "\t\tif (!for_us && li_gw_proxy_arp(netif, &dipaddr)) {\n"
+        "\t\t\tfor_us = 1;\n"
+        "\t\t}\n"
         "#endif\n",
     )
     hunk_b = (
