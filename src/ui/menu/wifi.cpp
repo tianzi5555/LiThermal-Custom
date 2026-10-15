@@ -11,7 +11,7 @@
 // 注意：相机里的中文字体是子集化过的（只含 0x20-0x7F 和 107 个特定汉字），
 //       所以这里所有文案一律用 ASCII，绝对不会出现空心方块。
 //
-// 后端：wifiManager（BW21 控制 API / 本机 wlan0 / 演示数据）
+// 后端：wifiManager（本机 wlan0，wpa_supplicant）
 
 #include "my_main.h"
 #include "uiTrace.h"
@@ -192,7 +192,7 @@ static void pass_connect_cb(lv_event_t *e)
         return;
     }
     if (lbl_status && lv_obj_is_valid(lbl_status))
-        lv_label_set_text(lbl_status, "正在把密码交给 BW21 ...");
+        lv_label_set_text(lbl_status, "正在连接 ...");
     wifi_connect(cur_ssid, txt ? txt : "");
     pass_back_cb(NULL);
 }
@@ -391,7 +391,7 @@ static void rebuild_ap_list(const wifi_state_t *st)
     if (st->ap_count <= 0)
     {
         lv_obj_t *lab = lv_label_create(list_cont);
-        lv_label_set_text(lab, st->backend == WIFI_BACKEND_DEMO ? "暂无演示数据" : "没扫到网络，请按重新扫描");
+        lv_label_set_text(lab, "没扫到网络，请按「重新扫描」");
         lv_obj_set_style_text_font(lab, &ui_font_cn16, LV_PART_MAIN | LV_STATE_DEFAULT);
         return;
     }
@@ -442,7 +442,7 @@ void menu_wifi_show(void)
     if (!wifi_inited)
     {
         wifi_inited = true;
-        wifi_init(NULL);
+        wifi_init();
     }
     if (wifi_open)
         return;

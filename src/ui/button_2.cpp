@@ -1,15 +1,13 @@
 #include <my_main.h>
-#include "wifiManager.h"
 
-// WiFi 入口是否显示：由隐藏页里的「网络功能总开关」决定，默认关闭。
-// 关着的时候主菜单保持原来的 3 个入口、原来的尺寸。
+// WiFi 入口常显（通用的本机 WiFi 设置）
 static bool menu_wifi_entry_enabled()
 {
-    return net_feature_enabled() != 0;
+    return true;
 }
 static lv_coord_t menu_box_width()
 {
-    return menu_wifi_entry_enabled() ? 300 : 230;
+    return 300;
 }
 
 // 处理中键按下事件
@@ -252,10 +250,6 @@ void refresh_menu_key()
             case MODE_WIFI_SETTINGS:
                 // 交给 WiFi 页面自己处理：密码页 → 回列表；列表页 → 关闭
                 menu_wifi_loop(true);
-                break;
-            case MODE_NET_SWITCH:
-                // 隐藏的网络功能开关页：返回到系统设置
-                menu_netswitch_loop(true);
                 break;
             default:
                 break;

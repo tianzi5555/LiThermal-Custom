@@ -129,9 +129,9 @@ int main()
     ui_center_display_create();
     pthread_create(&thread_ui, NULL, thread_ui_func, NULL);
     cameraUtils.initHTTPClient();
-    // 开机就把网络后端线程拉起来：探测 BW21 + 用已保存凭据自动连接。
-    // 这样不用先去点 WiFi 页面，插上 BW21 就能自动上网。
-    wifi_init(NULL);
+    // 开机就把 WiFi 管理线程拉起来：检测本机无线网卡 + 用已保存凭据自动连接。
+    // 这样不用先去点 WiFi 页面，网卡一插上就会自动连。
+    wifi_init();
     pthread_create(&thread_app, NULL, thread_app_func, NULL);
     pthread_create(&thread_center_temp, NULL, thread_center_temp_func, NULL);
     void *result;

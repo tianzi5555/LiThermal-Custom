@@ -198,11 +198,6 @@ void *thread_hal_func(void *)
             // WiFi 设置页：刷新扫描结果/状态；返回键由 refresh_menu_key 转发
             menu_wifi_loop(false);
         }
-        else if (current_mode == MODE_NET_SWITCH)
-        {
-            // 隐藏的网络功能开关页；返回键由 refresh_menu_key 转发
-            menu_netswitch_loop(false);
-        }
         else // 清零提取出的编码器变化值
         {
             if (current_mode == MODE_SYSTEM_SETTINGS && HAL::key_press_event[2])
@@ -221,17 +216,6 @@ void *thread_hal_func(void *)
                     menu_system_hide();
                     UNLOCKLV();
                     menu_hidden_gallery_show();
-                }
-                else if (system_noiseclear_option_focused())
-                {
-                    // 「手动清除噪声」上按录像键：进入隐藏的网络功能开关页
-                    ui_trace("myHAL: 录像键+焦点在手动清除噪声 → 打开隐藏页");
-                    LOCKLV();
-                    menu_system_hide();
-                    UNLOCKLV();
-                    menu_netswitch_show();
-                    ui_trace("myHAL: 隐藏页已打开，切模式 MODE_NET_SWITCH");
-                    current_mode = MODE_NET_SWITCH;
                 }
             }
             else

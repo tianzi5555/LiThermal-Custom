@@ -1,5 +1,9 @@
-// WiFi 后端实现（相机侧）
-// 详见 include/wifiManager.h 的说明。所有网络操作在后台线程执行，UI 只读快照。
+// 相机本机 WiFi 管理（通用版）
+//
+// 驱动相机自己的无线网卡（wlan0，例如 USB 的 MT7612U），走
+// wpa_supplicant + wpa_cli + udhcpc。所有操作在后台线程完成，
+// 界面只读状态快照（wifi_state_t），不会阻塞 LVGL。
+
 #include "wifiManager.h"
 #include "uiTrace.h"
 
@@ -10,43 +14,43 @@
 #include <unistd.h>
 #include <pthread.h>
 #include <sys/stat.h>
-#include <ifaddrs.h>
-#include <dirent.h>
-#include <net/if.h>
-#include <arpa/inet.h>
-#include <netinet/in.h>
+#include <time.h>
 
-#include "httplib.h"
-#include "cJSON.h"
-
-#define WIFI_CONF_PATH "/mnt/UDISK/wifi.conf"
-#define WIFI_CTL_PATH "/mnt/UDISK/wifi_ctl.txt"
-#define WIFI_CTL_DEFAULT "http://192.168.42.1:8080"
-#define WIFI_LOCAL_IF "wlan0"
+#define WIFI_CONF_PATH "/mnt/UDISK/wifi.conf"          // SSID=/PSK= 已保存凭据
+#define WPA_CONF_PATH  "/mnt/UDISK/wpa_supplicant.conf" // 生成的 wpa_supplicant 配置
+#define WPA_CTRL_DIR   "/var/run/wpa_supplicant"       // ctrl_interface 目录
 
 static wifi_state_t g_st;
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_cv = PTHREAD_COND_INITIALIZER;
 static pthread_t g_worker;
 static int g_worker_started = 0;
-static int g_auto_connect_done = 0; /* 开机自动用已保存凭据连一次 */
+static int g_auto_connect_done = 0;
 
 static int g_cmd_scan = 0, g_cmd_status = 0, g_cmd_connect = 0, g_cmd_disconnect = 0;
 static char g_new_ssid[WIFI_SSID_LEN];
 static char g_new_pass[WIFI_PASS_LEN];
-static char g_ctl[160] = WIFI_CTL_DEFAULT;
+
+static char g_if[16] = "wlan0"; // 实际使用的无线网卡
+static int g_wpa_started = 0;   // 我们自己拉起过 wpa_supplicant
 
 // ---------------------------------------------------------------- 小工具
 static void st_setf(int seq, char *dst, size_t n, const char *fmt, ...)
 {
     va_list ap;
+    char tmp[sizeof(g_st.status)];
     va_start(ap, fmt);
-    vsnprintf(dst, n, fmt, ap);
+    vsnprintf(tmp, sizeof(tmp), fmt, ap);
     va_end(ap);
-    if (seq)
-        g_st.status_seq++;
+
+    pthread_mutex_lock(&g_lock);
+    snprintf(dst, n, "%s", tmp);
+    g_st.status_seq++;
+    (void)seq;
+    pthread_mutex_unlock(&g_lock);
 }
-#define SET_STATUS(...) st_setf(1, g_st.status, sizeof(g_st.status), __VA_ARGS__)
+
+#define SET_STATUS(...) st_setf(0, g_st.status, sizeof(g_st.status), __VA_ARGS__)
 #define SET_ERR(...)    st_setf(0, g_st.err, sizeof(g_st.err), __VA_ARGS__)
 
 static void str_copy(char *dst, size_t n, const char *src)
@@ -55,313 +59,122 @@ static void str_copy(char *dst, size_t n, const char *src)
         return;
     if (!src)
         src = "";
-    strncpy(dst, src, n - 1);
-    dst[n - 1] = 0;
+    snprintf(dst, n, "%s", src);
 }
 
-
-/* ECM 网卡（usb*）要是没拿到我们约定的 IP，就由应用自己补上。
-   开机脚本有时配不上（网卡出现太晚等），应用一直跑着，兜底更可靠。 */
-static void net_fix_local_iface(void)
+static void trim_nl(char *s)
 {
-        system("for i in $(ls /sys/class/net 2>/dev/null); do "
-           "case \"$i\" in lo|wlan0|eth0|sit0) continue;; esac; "
-           "[ -e /sys/class/net/\"$i\"/device ] && continue; "   /* 有 device 的是真 USB 网卡(4117)，跳过 */
-           "if ! ip addr show dev \"$i\" 2>/dev/null | grep -q '192.168.2.240'; then "
-           "  ifconfig \"$i\" 192.168.2.240 netmask 255.255.255.0 up 2>/dev/null; "
-           "  route add default gw 192.168.2.250 dev \"$i\" 2>/dev/null; "
-           "  echo nameserver 192.168.2.1 > /etc/resolv.conf 2>/dev/null; "
-           "  echo \"[netfix] $i -> 192.168.2.240 (gw 192.168.2.250)\" >> /mnt/UDISK/ui.log; "
-           "fi; done");
+    if (!s)
+        return;
+    size_t L = strlen(s);
+    while (L && (s[L - 1] == '\n' || s[L - 1] == '\r' || s[L - 1] == ' ' || s[L - 1] == '\t'))
+        s[--L] = 0;
 }
 
-// 把本机各网卡（名字=IP(状态)）拼成一行，用于屏幕/日志诊断
-static void wifi_collect_ifaces(char *out, size_t n)
-{
-    struct ifaddrs *ifa = NULL;
-    struct ifaddrs *p;
-    size_t used = 0;
-
-    if (!out || n == 0)
-        return;
-    out[0] = 0;
-
-    if (getifaddrs(&ifa) != 0)
-    {
-        snprintf(out, n, "(读取网卡失败)");
-        return;
-    }
-    for (p = ifa; p != NULL; p = p->ifa_next)
-    {
-        char ip[32];
-        const char *flags;
-        if (p->ifa_addr == NULL || p->ifa_addr->sa_family != AF_INET)
-            continue;
-        if (strcmp(p->ifa_name, "lo") == 0)
-            continue;
-        flags = (p->ifa_flags & IFF_UP) ? "UP" : "DOWN";
-        ip[0] = 0;
-        inet_ntop(AF_INET, &((struct sockaddr_in *)p->ifa_addr)->sin_addr, ip, sizeof(ip));
-        if (used < n)
-            used += (size_t)snprintf(out + used, n - used, "%s%s=%s(%s)",
-                                     used ? " " : "", p->ifa_name, ip[0] ? ip : "noip", flags);
-    }
-    freeifaddrs(ifa);
-
-    /* 再扫一遍 /sys/class/net：把没有 IPv4 的网卡也列出来（noip），
-       这样日志里能区分「网卡不存在」和「网卡在但没 IP」 */
-    {
-        DIR *d = opendir("/sys/class/net");
-        struct dirent *e;
-        if (d) {
-            while ((e = readdir(d)) != NULL) {
-                char tag[24];
-                if (e->d_name[0] == '.' || strcmp(e->d_name, "lo") == 0)
-                    continue;
-                snprintf(tag, sizeof(tag), "%s=", e->d_name);
-                if (strstr(out, tag) != NULL)
-                    continue; /* 已经列过了 */
-                if (used < n)
-                    used += (size_t)snprintf(out + used, n - used, "%s%s=noip",
-                                             used ? " " : "", e->d_name);
-            }
-            closedir(d);
-        }
-    }
-    if (out[0] == 0)
-        snprintf(out, n, "(no other iface)");
-}
-
-// 执行命令并收集 stdout（本地后端用）
+// 跑一条命令，可选拿输出
 static int run_cmd(const char *cmd, char *out, size_t outn)
 {
-    if (out && outn)
-        out[0] = 0;
     FILE *p = popen(cmd, "r");
     if (!p)
         return -1;
-    size_t used = 0;
-    if (out && outn > 1)
+    if (out && outn)
     {
         size_t got = fread(out, 1, outn - 1, p);
-        used = got;
+        out[got] = 0;
     }
-    if (out && outn)
-        out[used] = 0;
     int rc = pclose(p);
     return rc;
 }
 
-// ---------------------------------------------------------------- 后端探测
-static void probe_backend(void)
+// ---------------------------------------------------------------- 网卡 / wpa
+static int iface_exists(const char *n)
 {
-    // 1) BW21 控制 API
-    try
+    char path[64];
+    snprintf(path, sizeof(path), "/sys/class/net/%s", n);
+    return access(path, F_OK) == 0;
+}
+
+static void pick_iface(void)
+{
+    // 优先用已记录的；否则在 /sys/class/net 里找第一个 wlan*
+    if (iface_exists(g_if))
+        return;
+    char buf[2048];
+    if (run_cmd("ls /sys/class/net 2>/dev/null", buf, sizeof(buf)) != 0)
+        return;
+    char *line = strtok(buf, "\n");
+    while (line)
     {
-        httplib::Client cli(g_ctl);
-        cli.set_connection_timeout(2, 0);
-        cli.set_read_timeout(3, 0);
-        auto res = cli.Get("/api/sys/info");
-        if (res && res->status == 200)
+        trim_nl(line);
+        if (strncmp(line, "wlan", 4) == 0)
         {
-            g_st.backend = WIFI_BACKEND_BW21;
-            SET_STATUS("已连接 BW21 控制接口 %s", g_ctl);
-            ui_trace("probe: BW21 后端 OK (%s)", g_ctl);
+            str_copy(g_if, sizeof(g_if), line);
+            ui_trace("wifi: 使用无线网卡 %s", g_if);
             return;
         }
-    }
-    catch (...)
-    {
-    }
-    // 2) 本机 wlan0
-    if (access("/sys/class/net/" WIFI_LOCAL_IF, F_OK) == 0)
-    {
-        g_st.backend = WIFI_BACKEND_LOCAL;
-        SET_STATUS("使用本机 %s", WIFI_LOCAL_IF);
-        return;
-    }
-    // 3) 都没戏：先尝试自己把 ECM 网卡 IP 补上（兜底），再把状态报出来
-    {
-        char info[160];
-        static int fix_tick = 0;
-        if ((++fix_tick % 3) == 1)
-            net_fix_local_iface();
-        wifi_collect_ifaces(info, sizeof(info));
-        ui_trace("probe: 未找到后端 %s；本机网卡: %s", g_ctl, info);
-        g_st.backend = WIFI_BACKEND_DEMO;
-        SET_STATUS("未找到 BW21 后端(%s)\n本机网卡: %s", g_ctl, info);
+        line = strtok(NULL, "\n");
     }
 }
 
-// ---------------------------------------------------------------- DEMO 数据
-static void scan_demo(void)
+static void ensure_wpa(void)
 {
-    static const struct
-    {
-        const char *ssid;
-        int rssi;
-        int sec;
-    } demo[] = {
-        {"LiThermal-Demo", -45, 1},
-        {"HomeWiFi_5G", -61, 1},
-        {"TP-LINK_2.4G", -72, 1},
-        {"ChinaNet-open", -80, 0},
-        {"Xiaomi_AX6000", -55, 1},
-    };
-    int n = sizeof(demo) / sizeof(demo[0]);
-    if (n > WIFI_MAX_APS)
-        n = WIFI_MAX_APS;
-    for (int i = 0; i < n; i++)
-    {
-        str_copy(g_st.aps[i].ssid, WIFI_SSID_LEN, demo[i].ssid);
-        g_st.aps[i].rssi = demo[i].rssi;
-        g_st.aps[i].secure = demo[i].sec;
-    }
-    g_st.ap_count = n;
-    g_st.scan_seq++;
-}
+    char cmd[256];
+    // 网卡先 up
+    snprintf(cmd, sizeof(cmd), "ifconfig %s up 2>/dev/null", g_if);
+    run_cmd(cmd, NULL, 0);
 
-static void connect_demo(const char *ssid, const char *pass)
-{
-    (void)pass;
-    SET_STATUS("演示：正在模拟连接 %s ...", ssid);
-    g_st.conn_state = WIFI_ST_CONNECTING;
-    usleep(1200 * 1000);
-    str_copy(g_st.connected_ssid, WIFI_SSID_LEN, ssid);
-    str_copy(g_st.ip, sizeof(g_st.ip), "192.168.42.2");
-    g_st.conn_state = WIFI_ST_CONNECTED;
-    SET_STATUS("演示：已模拟连接 %s（未真正联网）", ssid);
-}
-
-// ---------------------------------------------------------------- BW21 后端
-static void scan_bw21(void)
-{
-    httplib::Client cli(g_ctl);
-    cli.set_connection_timeout(2, 0);
-    cli.set_read_timeout(6, 0);
-    auto res = cli.Get("/api/wifi/scan");
-    if (!res || res->status != 200)
+    // wpa_supplicant 没跑就自己拉起来（-B 后台）
+    if (run_cmd("ps | grep -v grep | grep -q wpa_supplicant", NULL, 0) != 0)
     {
-        SET_ERR("扫描失败：%s", res ? "HTTP 错误" : "连不上 BW21");
-        SET_STATUS("扫描失败：BW21 无响应");
-        return;
-    }
-    cJSON *root = cJSON_Parse(res->body.c_str());
-    if (!root)
-    {
-        SET_ERR("扫描结果不是合法 JSON");
-        SET_STATUS("扫描失败：返回格式错误");
-        return;
-    }
-    int n = 0;
-    cJSON *aps = cJSON_GetObjectItem(root, "aps");
-    if (aps)
-    {
-        int total = cJSON_GetArraySize(aps);
-        for (int i = 0; i < total && n < WIFI_MAX_APS; i++)
+        mkdir(WPA_CTRL_DIR, 0777);
+        if (access(WPA_CONF_PATH, F_OK) != 0)
         {
-            cJSON *it = cJSON_GetArrayItem(aps, i);
-            if (!it)
-                continue;
-            cJSON *jssid = cJSON_GetObjectItem(it, "ssid");
-            cJSON *jrssi = cJSON_GetObjectItem(it, "rssi");
-            cJSON *jsec = cJSON_GetObjectItem(it, "sec");
-            if (!jssid || !jssid->valuestring)
-                continue;
-            str_copy(g_st.aps[n].ssid, WIFI_SSID_LEN, jssid->valuestring);
-            g_st.aps[n].rssi = jrssi ? jrssi->valueint : 0;
-            g_st.aps[n].secure = jsec ? jsec->valueint : 1;
-            n++;
+            FILE *f = fopen(WPA_CONF_PATH, "w");
+            if (f)
+            {
+                fprintf(f, "ctrl_interface=%s\nupdate_config=1\n", WPA_CTRL_DIR);
+                fclose(f);
+            }
         }
+        snprintf(cmd, sizeof(cmd), "wpa_supplicant -B -i %s -c %s -D nl80211 2>/dev/null", g_if, WPA_CONF_PATH);
+        if (run_cmd(cmd, NULL, 0) != 0)
+        {
+            snprintf(cmd, sizeof(cmd), "wpa_supplicant -B -i %s -c %s 2>/dev/null", g_if, WPA_CONF_PATH);
+            run_cmd(cmd, NULL, 0);
+        }
+        g_wpa_started = 1;
+        ui_trace("wifi: 已启动 wpa_supplicant (%s)", g_if);
+        sleep(2);
     }
-    cJSON_Delete(root);
-    g_st.ap_count = n;
-    g_st.scan_seq++;
-    SET_STATUS("扫描完成，共 %d 个网络", n);
 }
 
-static void connect_bw21(const char *ssid, const char *pass)
+static int wpa_cli(const char *args, char *out, size_t outn)
 {
-    cJSON *o = cJSON_CreateObject();
-    cJSON_AddStringToObject(o, "ssid", ssid);
-    cJSON_AddStringToObject(o, "pass", pass ? pass : "");
-    char *body = cJSON_PrintUnformatted(o);
-    cJSON_Delete(o);
-    httplib::Client cli(g_ctl);
-    cli.set_connection_timeout(2, 0);
-    cli.set_read_timeout(10, 0);
-    auto res = cli.Post("/api/wifi/connect", body ? body : "{}", "application/json");
-    if (body)
-        free(body);
-    if (res && res->status == 200)
-    {
-        g_st.conn_state = WIFI_ST_CONNECTING;
-        str_copy(g_st.connected_ssid, WIFI_SSID_LEN, ssid);
-        SET_STATUS("已把 %s 的密码交给 BW21，正在连接 ...", ssid);
-    }
-    else
-    {
-        g_st.conn_state = WIFI_ST_FAILED;
-        SET_ERR("BW21 未接受连接请求");
-        SET_STATUS("连接失败：BW21 无响应");
-    }
+    char cmd[512];
+    snprintf(cmd, sizeof(cmd), "wpa_cli -i %s -p %s %s 2>/dev/null", g_if, WPA_CTRL_DIR, args);
+    return run_cmd(cmd, out, outn);
 }
 
-static void status_bw21(void)
-{
-    httplib::Client cli(g_ctl);
-    cli.set_connection_timeout(2, 0);
-    cli.set_read_timeout(4, 0);
-    auto res = cli.Get("/api/wifi/status");
-    if (!res || res->status != 200)
-        return;
-    cJSON *root = cJSON_Parse(res->body.c_str());
-    if (!root)
-        return;
-    cJSON *jstate = cJSON_GetObjectItem(root, "state");
-    cJSON *jssid = cJSON_GetObjectItem(root, "ssid");
-    cJSON *jip = cJSON_GetObjectItem(root, "ip");
-    const char *state = (jstate && jstate->valuestring) ? jstate->valuestring : "";
-    if (strcmp(state, "connected") == 0)
-    {
-        g_st.conn_state = WIFI_ST_CONNECTED;
-        if (jssid && jssid->valuestring)
-            str_copy(g_st.connected_ssid, WIFI_SSID_LEN, jssid->valuestring);
-        if (jip && jip->valuestring)
-            str_copy(g_st.ip, sizeof(g_st.ip), jip->valuestring);
-        SET_STATUS("已连接 %s  地址 %s", g_st.connected_ssid, g_st.ip);
-    }
-    else if (strcmp(state, "connecting") == 0)
-    {
-        g_st.conn_state = WIFI_ST_CONNECTING;
-        SET_STATUS("正在连接 %s ...", (jssid && jssid->valuestring) ? jssid->valuestring : "");
-    }
-    else if (strcmp(state, "failed") == 0)
-    {
-        g_st.conn_state = WIFI_ST_FAILED;
-        SET_STATUS("连接失败（密码错或信号太弱）");
-    }
-    else
-    {
-        g_st.conn_state = WIFI_ST_IDLE;
-        SET_STATUS("未连接 WiFi");
-    }
-    cJSON_Delete(root);
-}
-
-// ---------------------------------------------------------------- 本机 wlan0 后端
+// ---------------------------------------------------------------- 扫描 / 连接 / 状态
 static void scan_local(void)
 {
     char buf[4096];
-    // 先触发一次扫描，再取结果
-    run_cmd("wpa_cli -i " WIFI_LOCAL_IF " scan >/dev/null 2>&1", NULL, 0);
+    SET_STATUS("正在扫描 ...");
+    g_st.conn_state = WIFI_ST_SCANNING;
+    g_st.status_seq++;
+
+    wpa_cli("scan >/dev/null", NULL, 0);
     sleep(2);
-    if (run_cmd("wpa_cli -i " WIFI_LOCAL_IF " scan_results 2>/dev/null", buf, sizeof(buf)) != 0)
+
+    if (wpa_cli("scan_results", buf, sizeof(buf)) != 0)
     {
         SET_ERR("wpa_cli 执行失败");
-        SET_STATUS("扫描失败：wpa_cli 不可用");
+        SET_STATUS("扫描失败：wpa_cli 不可用（无线网卡没起来？）");
+        g_st.conn_state = WIFI_ST_FAILED;
+        g_st.status_seq++;
         return;
     }
+
     int n = 0;
     char *line = strtok(buf, "\n");
     if (line && strstr(line, "bssid"))
@@ -384,10 +197,8 @@ static void scan_local(void)
                         int rssi = atoi(f2 + 1);
                         int sec = (strstr(f3 + 1, "WPA") || strstr(f3 + 1, "WEP")) ? 1 : 0;
                         ssid++;
-                        size_t L = strlen(ssid);
-                        while (L && (ssid[L - 1] == '\r' || ssid[L - 1] == '\n'))
-                            ssid[--L] = 0;
-                        if (L)
+                        trim_nl(ssid);
+                        if (ssid[0])
                         {
                             str_copy(g_st.aps[n].ssid, WIFI_SSID_LEN, ssid);
                             g_st.aps[n].rssi = rssi;
@@ -400,23 +211,25 @@ static void scan_local(void)
         }
         line = strtok(NULL, "\n");
     }
+
     g_st.ap_count = n;
+    pthread_mutex_lock(&g_lock);
     g_st.scan_seq++;
-    SET_STATUS("扫描完成，共 %d 个网络", n);
+    pthread_mutex_unlock(&g_lock);
+    g_st.conn_state = WIFI_ST_IDLE;
+    g_st.status_seq++;
+    if (n == 0)
+        SET_STATUS("没扫到网络（无线网卡正常吗？可重试一次）");
+    else
+        SET_STATUS("扫描完成，共 %d 个网络", n);
 }
 
-static void connect_local(const char *ssid, const char *pass)
+static int write_wpa_network(const char *ssid, const char *pass)
 {
-    char cmd[512];
-    FILE *f = fopen("/etc/wpa_supplicant.conf", "w");
+    FILE *f = fopen(WPA_CONF_PATH, "w");
     if (!f)
-    {
-        g_st.conn_state = WIFI_ST_FAILED;
-        SET_ERR("无法写 wpa 配置文件");
-        SET_STATUS("连接失败：配置不可写");
-        return;
-    }
-    fprintf(f, "ctrl_interface=/var/log/wpa_supplicant\nupdate_config=1\n");
+        return -1;
+    fprintf(f, "ctrl_interface=%s\nupdate_config=1\n", WPA_CTRL_DIR);
     fprintf(f, "network={\n\tssid=\"%s\"\n", ssid);
     if (pass && pass[0])
         fprintf(f, "\tpsk=\"%s\"\n", pass);
@@ -424,22 +237,47 @@ static void connect_local(const char *ssid, const char *pass)
         fprintf(f, "\tkey_mgmt=NONE\n");
     fprintf(f, "}\n");
     fclose(f);
+    return 0;
+}
 
-    snprintf(cmd, sizeof(cmd), "wpa_cli -i " WIFI_LOCAL_IF " reconfigure >/dev/null 2>&1 || killall -HUP wpa_supplicant");
-    run_cmd(cmd, NULL, 0);
+static void connect_local(const char *ssid, const char *pass)
+{
+    char cmd[256];
+
+    if (write_wpa_network(ssid, pass) != 0)
+    {
+        g_st.conn_state = WIFI_ST_FAILED;
+        SET_ERR("无法写 %s", WPA_CONF_PATH);
+        SET_STATUS("连接失败：配置写不进去");
+        g_st.status_seq++;
+        return;
+    }
+
+    SET_STATUS("正在连接 %s ...", ssid);
     g_st.conn_state = WIFI_ST_CONNECTING;
     str_copy(g_st.connected_ssid, WIFI_SSID_LEN, ssid);
-    SET_STATUS("正在连接 %s ...", ssid);
+    g_st.status_seq++;
+
+    // 让 wpa_supplicant 重新读配置
+    if (wpa_cli("reconfigure >/dev/null", NULL, 0) != 0)
+    {
+        snprintf(cmd, sizeof(cmd), "killall -HUP wpa_supplicant 2>/dev/null");
+        run_cmd(cmd, NULL, 0);
+    }
     sleep(6);
-    snprintf(cmd, sizeof(cmd), "udhcpc -i " WIFI_LOCAL_IF " -n -q -t 5 -T 3 >/dev/null 2>&1");
+
+    snprintf(cmd, sizeof(cmd), "udhcpc -i %s -n -q -t 6 -T 3 >/dev/null 2>&1", g_if);
     run_cmd(cmd, NULL, 0);
+
+    status_local();
 }
 
 static void status_local(void)
 {
     char buf[1024];
-    if (run_cmd("wpa_cli -i " WIFI_LOCAL_IF " status 2>/dev/null", buf, sizeof(buf)) != 0)
+    if (wpa_cli("status", buf, sizeof(buf)) != 0)
         return;
+
     if (strstr(buf, "wpa_state=COMPLETED"))
     {
         g_st.conn_state = WIFI_ST_CONNECTED;
@@ -450,21 +288,34 @@ static void status_local(void)
             char *e = strchr(p, '\n');
             if (e)
                 *e = 0;
+            trim_nl(p);
             str_copy(g_st.connected_ssid, WIFI_SSID_LEN, p);
         }
         char ip[64] = "";
-        if (run_cmd("ip -4 -o addr show " WIFI_LOCAL_IF " 2>/dev/null | awk '{print $4}' | cut -d/ -f1", ip, sizeof(ip)) == 0)
+        char cmd[128];
+        snprintf(cmd, sizeof(cmd), "ip -4 -o addr show %s 2>/dev/null | awk '{print $4}' | cut -d/ -f1", g_if);
+        if (run_cmd(cmd, ip, sizeof(ip)) == 0)
         {
-            size_t L = strlen(ip);
-            while (L && (ip[L - 1] == '\n' || ip[L - 1] == '\r'))
-                ip[--L] = 0;
+            trim_nl(ip);
             str_copy(g_st.ip, sizeof(g_st.ip), ip);
         }
-        SET_STATUS("已连接 %s  地址 %s", g_st.connected_ssid, g_st.ip);
+        g_st.status_seq++;
+        if (g_st.ip[0])
+            SET_STATUS("已连接 %s   地址 %s", g_st.connected_ssid, g_st.ip);
+        else
+            SET_STATUS("已连上 %s，但还没拿到 IP", g_st.connected_ssid);
+    }
+    else if (strstr(buf, "wpa_state=SCANNING") || strstr(buf, "wpa_state=ASSOCIATING") ||
+             strstr(buf, "wpa_state=4WAY_HANDSHAKE"))
+    {
+        g_st.conn_state = WIFI_ST_CONNECTING;
+        g_st.status_seq++;
+        SET_STATUS("正在连接 %s ...", g_st.connected_ssid);
     }
     else
     {
         g_st.conn_state = WIFI_ST_IDLE;
+        g_st.status_seq++;
         SET_STATUS("未连接 WiFi");
     }
 }
@@ -472,71 +323,69 @@ static void status_local(void)
 // ---------------------------------------------------------------- 任务派发
 static void do_scan(void)
 {
-    g_st.conn_state = (g_st.conn_state == WIFI_ST_CONNECTING) ? g_st.conn_state : WIFI_ST_SCANNING;
-    switch (g_st.backend)
+    if (!iface_exists(g_if))
     {
-    case WIFI_BACKEND_BW21:
-        scan_bw21();
-        break;
-    case WIFI_BACKEND_LOCAL:
-        scan_local();
-        break;
-    default:
-        scan_demo();
-        break;
+        pick_iface();
+        if (!iface_exists(g_if))
+        {
+            g_st.conn_state = WIFI_ST_FAILED;
+            g_st.status_seq++;
+            SET_STATUS("未找到无线网卡（wlan0）。\n请确认 USB 无线网卡已插好、驱动已加载。");
+            return;
+        }
     }
+    ensure_wpa();
+    scan_local();
 }
 
 static void do_connect(const char *ssid, const char *pass)
 {
-    switch (g_st.backend)
+    if (!iface_exists(g_if))
+        pick_iface();
+    if (!iface_exists(g_if))
     {
-    case WIFI_BACKEND_BW21:
-        connect_bw21(ssid, pass);
-        break;
-    case WIFI_BACKEND_LOCAL:
-        connect_local(ssid, pass);
-        break;
-    default:
-        connect_demo(ssid, pass);
-        break;
+        g_st.conn_state = WIFI_ST_FAILED;
+        g_st.status_seq++;
+        SET_STATUS("未找到无线网卡，无法连接");
+        return;
     }
+    ensure_wpa();
+    connect_local(ssid, pass);
 }
 
 static void do_status(void)
 {
-    if (g_st.backend == WIFI_BACKEND_BW21)
-        status_bw21();
-    else if (g_st.backend == WIFI_BACKEND_LOCAL)
+    if (iface_exists(g_if))
+    {
+        ensure_wpa();
         status_local();
+    }
 }
 
 static void *wifi_worker(void *)
 {
-    ui_trace("wifiWorker: 线程启动，探测后端");
-    probe_backend();
-    ui_trace("wifiWorker: 后端=%d", (int)g_st.backend);
-    if (g_st.backend != WIFI_BACKEND_DEMO)
+    ui_trace("wifiWorker: 启动");
+    pick_iface();
+    if (iface_exists(g_if))
     {
-        do_scan();
-        do_status();
+        ensure_wpa();
+        status_local();
     }
     else
     {
-        scan_demo();
+        SET_STATUS("未找到无线网卡（wlan0）。\n请确认 USB 无线网卡已插好、驱动已加载。");
     }
-    ui_trace("wifiWorker: 首次探测完成，进入等待");
+    ui_trace("wifiWorker: 就绪，iface=%s exists=%d", g_if, iface_exists(g_if));
+
     int idle_ticks = 0;
     while (1)
     {
         pthread_mutex_lock(&g_lock);
         if (!g_cmd_scan && !g_cmd_status && !g_cmd_connect && !g_cmd_disconnect)
         {
-            /* 最多等 3 秒：等不到命令也要醒来做「定期重探」。
-               否则相机在 BW21 网卡就绪之前打开本页，就会永远停在演示数据。 */
             struct timespec ts;
             clock_gettime(CLOCK_REALTIME, &ts);
-            ts.tv_sec += 3;
+            ts.tv_sec += 3; // 每 3 秒醒一次：网卡/驱动可能是后插上的
             pthread_cond_timedwait(&g_cv, &g_lock, &ts);
         }
         int sc = g_cmd_scan, stt = g_cmd_status, cn = g_cmd_connect, dc = g_cmd_disconnect;
@@ -544,62 +393,55 @@ static void *wifi_worker(void *)
         str_copy(ssid, sizeof(ssid), g_new_ssid);
         str_copy(pass, sizeof(pass), g_new_pass);
         g_cmd_scan = g_cmd_status = g_cmd_connect = g_cmd_disconnect = 0;
-        int need_reprobe = (g_st.backend == WIFI_BACKEND_DEMO || g_st.backend == WIFI_BACKEND_NONE) ? 1 : 0;
         g_st.busy = 1;
         pthread_mutex_unlock(&g_lock);
 
-        if (need_reprobe)
+        // 网卡是后插的（比如 USB 网卡刚插上 / 模块刚加载）
+        if (!iface_exists(g_if))
         {
-            probe_backend();
-            if (g_st.backend == WIFI_BACKEND_BW21)
+            pick_iface();
+            if (iface_exists(g_if))
             {
-                ui_trace("wifiWorker: 重探成功，后端=BW21");
+                ui_trace("wifiWorker: 检测到网卡 %s，初始化", g_if);
+                g_auto_connect_done = 0;
+                ensure_wpa();
                 do_status();
-                do_scan();
             }
         }
-        else if (!sc && !stt && !cn && !dc)
+
+        // 开机自动用已保存的凭据连一次
+        if (iface_exists(g_if) && !g_auto_connect_done)
+        {
+            char a_ssid[WIFI_SSID_LEN], a_pass[WIFI_PASS_LEN];
+            g_auto_connect_done = 1;
+            if (wifi_load_credentials(a_ssid, sizeof(a_ssid), a_pass, sizeof(a_pass)) == 0 && a_ssid[0])
+            {
+                ui_trace("wifiWorker: 自动连接 %s", a_ssid);
+                do_connect(a_ssid, a_pass);
+            }
+        }
+
+        if (sc)
+            do_scan();
+        if (stt)
+            do_status();
+        if (cn)
+            do_connect(ssid, pass);
+        if (dc)
+        {
+            wpa_cli("disconnect >/dev/null", NULL, 0);
+            g_st.conn_state = WIFI_ST_IDLE;
+            g_st.status_seq++;
+            SET_STATUS("已断开");
+        }
+
+        if (!sc && !stt && !cn && !dc && iface_exists(g_if))
         {
             if (++idle_ticks >= 2)
             {
                 idle_ticks = 0;
                 do_status();
             }
-        }
-
-        /* 探到 BW21 后端后，用已保存的凭据自动连一次
-           （开机即可上网，不需要先点开 WiFi 页面） */
-        if (g_st.backend == WIFI_BACKEND_BW21 && !g_auto_connect_done)
-        {
-            char a_ssid[WIFI_SSID_LEN], a_pass[WIFI_PASS_LEN];
-            g_auto_connect_done = 1;
-            if (wifi_load_credentials(a_ssid, sizeof(a_ssid), a_pass, sizeof(a_pass)) == 0 && a_ssid[0])
-            {
-                ui_trace("autoconnect: 用已保存凭据连接 %s", a_ssid);
-                do_connect(a_ssid, a_pass);
-                do_status();
-            }
-            else
-            {
-                ui_trace("autoconnect: 没有已保存的凭据，跳过");
-            }
-        }
-
-        if (sc || stt || cn || dc)
-        {
-            ui_trace("wifiWorker: 收到命令 scan=%d status=%d connect=%d disc=%d", sc, stt, cn, dc);
-            if (cn)
-                do_connect(ssid, pass);
-            if (dc)
-            {
-                g_st.conn_state = WIFI_ST_IDLE;
-                SET_STATUS("已断开");
-            }
-            if (sc)
-                do_scan();
-            if (stt)
-                do_status();
-            ui_trace("wifiWorker: 命令处理完成");
         }
 
         pthread_mutex_lock(&g_lock);
@@ -617,32 +459,14 @@ static void kick(void)
 }
 
 // ---------------------------------------------------------------- 对外接口
-extern "C" void wifi_init(const char *ctl_base)
+extern "C" void wifi_init(void)
 {
-    if (ctl_base && ctl_base[0])
-        str_copy(g_ctl, sizeof(g_ctl), ctl_base);
-    else
-    {
-        // 允许用文件覆盖控制接口地址（不用重新编译固件）
-        FILE *f = fopen(WIFI_CTL_PATH, "r");
-        if (f)
-        {
-            char line[160] = "";
-            if (fgets(line, sizeof(line), f))
-            {
-                size_t L = strlen(line);
-                while (L && (line[L - 1] == '\n' || line[L - 1] == '\r' || line[L - 1] == ' '))
-                    line[--L] = 0;
-                if (L > 7)
-                    str_copy(g_ctl, sizeof(g_ctl), line);
-            }
-            fclose(f);
-        }
-    }
+    pthread_mutex_lock(&g_lock);
     memset(&g_st, 0, sizeof(g_st));
-    g_st.backend = WIFI_BACKEND_NONE;
     g_st.conn_state = WIFI_ST_IDLE;
-    str_copy(g_st.status, sizeof(g_st.status), "正在检测网络后端 ...");
+    snprintf(g_st.status, sizeof(g_st.status), "正在检测无线网卡 ...");
+    pthread_mutex_unlock(&g_lock);
+
     if (!g_worker_started)
     {
         g_worker_started = 1;
@@ -657,26 +481,6 @@ extern "C" void wifi_copy_state(wifi_state_t *dst)
     pthread_mutex_lock(&g_lock);
     *dst = g_st;
     pthread_mutex_unlock(&g_lock);
-}
-
-extern "C" const char *wifi_control_base(void)
-{
-    return g_ctl;
-}
-
-extern "C" const char *wifi_backend_name(int backend)
-{
-    switch (backend)
-    {
-    case WIFI_BACKEND_BW21:
-        return "BW21";
-    case WIFI_BACKEND_LOCAL:
-        return "本机 WiFi";
-    case WIFI_BACKEND_DEMO:
-        return "演示";
-    default:
-        return "无";
-    }
 }
 
 extern "C" void wifi_request_scan(void)
@@ -703,11 +507,12 @@ extern "C" int wifi_connect(const char *ssid, const char *pass)
     str_copy(g_new_ssid, sizeof(g_new_ssid), ssid);
     str_copy(g_new_pass, sizeof(g_new_pass), pass ? pass : "");
     g_cmd_connect = 1;
-    // 连接成功后再请求一次状态，让界面能看到 IP
-    g_cmd_status = 1;
     pthread_mutex_unlock(&g_lock);
     kick();
-    wifi_save_credentials(ssid, pass ? pass : "");
+
+    // 顺手把凭据存下来，下次开机自动连
+    if (wifi_save_credentials(ssid, pass ? pass : "") != 0)
+        ui_trace("wifi: 凭据保存失败");
     return 0;
 }
 
@@ -724,7 +529,8 @@ extern "C" int wifi_save_credentials(const char *ssid, const char *pass)
     FILE *f = fopen(WIFI_CONF_PATH, "w");
     if (!f)
         return -1;
-    fprintf(f, "SSID=%s\nPSK=%s\n", ssid ? ssid : "", pass ? pass : "");
+    fprintf(f, "SSID=%s\n", ssid ? ssid : "");
+    fprintf(f, "PSK=%s\n", pass ? pass : "");
     fclose(f);
     return 0;
 }
@@ -735,15 +541,14 @@ extern "C" int wifi_load_credentials(char *ssid, size_t n, char *pass, size_t m)
         ssid[0] = 0;
     if (pass && m)
         pass[0] = 0;
+
     FILE *f = fopen(WIFI_CONF_PATH, "r");
     if (!f)
         return -1;
     char line[256];
     while (fgets(line, sizeof(line), f))
     {
-        size_t L = strlen(line);
-        while (L && (line[L - 1] == '\n' || line[L - 1] == '\r'))
-            line[--L] = 0;
+        trim_nl(line);
         if (strncmp(line, "SSID=", 5) == 0 && ssid)
             str_copy(ssid, n, line + 5);
         else if (strncmp(line, "PSK=", 4) == 0 && pass)
@@ -751,99 +556,4 @@ extern "C" int wifi_load_credentials(char *ssid, size_t n, char *pass, size_t m)
     }
     fclose(f);
     return 0;
-}
-
-/* ================================================================== 网络功能总开关
- * 默认关闭：/mnt/UDISK/wifi_enabled 里是 1 才算启用。
- * 关着的时候开机脚本不碰 USB（保持原生 adb+MTP），相机功能完全正常。
- * 开启时顺手把 usbnet.conf 的 MODE 改成 ecm（BW21 的驱动只认 ECM），并写好控制接口地址。
- */
-#define NET_FLAG_PATH "/mnt/UDISK/wifi_enabled"
-#define USB_CONF_PATH "/mnt/UDISK/usbnet.conf"
-#define NET_CTL_URL   "http://192.168.2.250:8080"
-
-extern "C" int net_feature_enabled(void)
-{
-	FILE *f = fopen(NET_FLAG_PATH, "r");
-	char b[8] = {0};
-	if (f == NULL) {
-		return 0; /* 没有标记文件 = 默认关闭 */
-	}
-	if (fgets(b, sizeof(b), f) == NULL) {
-		fclose(f);
-		return 0;
-	}
-	fclose(f);
-	return (b[0] == '1') ? 1 : 0;
-}
-
-/* 把 usbnet.conf 里的 KEY=... 改成 KEY=val（没有这一行就追加） */
-static void net_conf_set_kv(const char *key, const char *val)
-{
-	char buf[4096];
-	char want[64];
-	size_t n = 0;
-	size_t klen = strlen(key);
-	FILE *f = fopen(USB_CONF_PATH, "r");
-	FILE *o;
-	char *p;
-	int wrote = 0;
-
-	snprintf(want, sizeof(want), "%s=%s", key, val);
-
-	if (f != NULL) {
-		n = fread(buf, 1, sizeof(buf) - 1, f);
-		fclose(f);
-	}
-	buf[n] = 0;
-
-	o = fopen(USB_CONF_PATH, "w");
-	if (o == NULL) {
-		return;
-	}
-	p = buf;
-	while (p != NULL && *p != 0) {
-		char *nl = strchr(p, '\n');
-		size_t len = (nl != NULL) ? (size_t)(nl - p) : strlen(p);
-		if (len >= klen + 1 && strncmp(p, key, klen) == 0 && p[klen] == '=' && !wrote) {
-			fprintf(o, "%s\n", want);
-			wrote = 1;
-		} else if (len > 0) {
-			fwrite(p, 1, len, o);
-			fputc('\n', o);
-		}
-		p = (nl != NULL) ? (nl + 1) : NULL;
-	}
-	if (!wrote) {
-		fprintf(o, "%s\n", want);
-	}
-	fclose(o);
-}
-
-extern "C" void net_feature_set(int enable)
-{
-	FILE *f = fopen(NET_FLAG_PATH, "w");
-	if (f != NULL) {
-		fprintf(f, "%d\n", enable ? 1 : 0);
-		fclose(f);
-	}
-	/* 开 = 出 ECM 网卡；关 = 不出网卡，USB 口回到原生 adb+MTP */
-	net_conf_set_kv("MODE", enable ? "ecm" : "off");
-
-	if (enable) {
-		/* 相机作为家里 LAN 的一员（BW21 做代理 ARP + IP 转发）：
-		   IP 用 BW21 网段的静态地址，网关指向 BW21，DNS 直接用路由器 */
-		net_conf_set_kv("USE_DHCP", "0");
-		net_conf_set_kv("IP", "192.168.2.240");
-		net_conf_set_kv("MASK", "255.255.255.0");
-		net_conf_set_kv("GW", "192.168.2.250");
-		net_conf_set_kv("DNS1", "192.168.2.1");
-	}
-
-	/* 控制接口地址（相机界面用它指挥 BW21） */
-	f = fopen(WIFI_CTL_PATH, "w");
-	if (f != NULL) {
-		fprintf(f, "%s\n", NET_CTL_URL);
-		fclose(f);
-	}
 }
