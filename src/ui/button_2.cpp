@@ -1,4 +1,16 @@
 #include <my_main.h>
+#include "wifiManager.h"
+
+// WiFi 入口是否显示：由隐藏页里的「网络功能总开关」决定，默认关闭。
+// 关着的时候主菜单保持原来的 3 个入口、原来的尺寸。
+static bool menu_wifi_entry_enabled()
+{
+    return net_feature_enabled() != 0;
+}
+static lv_coord_t menu_box_width()
+{
+    return menu_wifi_entry_enabled() ? 300 : 230;
+}
 
 // 处理中键按下事件
 #define MENU_BUTTON_2_BOX_WIDHT 300
@@ -38,6 +50,7 @@ void event_button_clicked_cb(lv_event_t *e)
 
 void menu_button_2_construct(lv_obj_t *parent)
 {
+    const bool wifi_entry = menu_wifi_entry_enabled();
     lv_obj_set_align(parent, LV_ALIGN_TOP_MID);
     lv_obj_set_flex_flow(parent, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(parent, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_END);
@@ -48,7 +61,7 @@ void menu_button_2_construct(lv_obj_t *parent)
     lv_obj_t *ui_Button2 = lv_btn_create(parent);
     lv_obj_set_width(ui_Button2, MENU_BUTTON_2_BUTTON_WIDTH_DEFAULT);
     lv_obj_set_height(ui_Button2, MENU_BUTTON_2_BUTTON_HEIGHT_DEFAULT);
-    lv_obj_set_x(ui_Button2, -102);
+    lv_obj_set_x(ui_Button2, wifi_entry ? -102 : -69);
     lv_obj_set_y(ui_Button2, 2);
     lv_obj_set_align(ui_Button2, LV_ALIGN_TOP_MID);
     lv_obj_add_flag(ui_Button2, LV_OBJ_FLAG_SCROLL_ON_FOCUS); /// Flags
@@ -77,7 +90,7 @@ void menu_button_2_construct(lv_obj_t *parent)
     lv_obj_t *ui_Button3 = lv_btn_create(parent);
     lv_obj_set_width(ui_Button3, MENU_BUTTON_2_BUTTON_WIDTH_DEFAULT);
     lv_obj_set_height(ui_Button3, MENU_BUTTON_2_BUTTON_HEIGHT_DEFAULT);
-    lv_obj_set_x(ui_Button3, -34);
+    lv_obj_set_x(ui_Button3, wifi_entry ? -34 : -1);
     lv_obj_set_y(ui_Button3, 3);
     lv_obj_set_align(ui_Button3, LV_ALIGN_TOP_MID);
     lv_obj_add_flag(ui_Button3, LV_OBJ_FLAG_SCROLL_ON_FOCUS); /// Flags
@@ -106,7 +119,7 @@ void menu_button_2_construct(lv_obj_t *parent)
     lv_obj_t *ui_Button4 = lv_btn_create(parent);
     lv_obj_set_width(ui_Button4, MENU_BUTTON_2_BUTTON_WIDTH_DEFAULT);
     lv_obj_set_height(ui_Button4, MENU_BUTTON_2_BUTTON_HEIGHT_DEFAULT);
-    lv_obj_set_x(ui_Button4, 34);
+    lv_obj_set_x(ui_Button4, wifi_entry ? 34 : 67);
     lv_obj_set_y(ui_Button4, 3);
     lv_obj_set_align(ui_Button4, LV_ALIGN_TOP_MID);
     lv_obj_add_flag(ui_Button4, LV_OBJ_FLAG_SCROLL_ON_FOCUS); /// Flags
@@ -132,7 +145,9 @@ void menu_button_2_construct(lv_obj_t *parent)
     lv_label_set_text(ui_Label9, "系统\n设置");
     lv_obj_set_style_text_font(ui_Label9, &ui_font_chinese16, LV_PART_MAIN | LV_STATE_DEFAULT);
 
-    // 第 4 个入口：WiFi 网络设置（图标位用文字，避免动字体子集）
+    // 第 4 个入口：WiFi 网络设置（只有总开关打开时才出现；图标位用文字，避免动字体子集）
+    if (wifi_entry)
+    {
     lv_obj_t *ui_Button5 = lv_btn_create(parent);
     lv_obj_set_width(ui_Button5, MENU_BUTTON_2_BUTTON_WIDTH_DEFAULT);
     lv_obj_set_height(ui_Button5, MENU_BUTTON_2_BUTTON_HEIGHT_DEFAULT);
@@ -162,11 +177,13 @@ void menu_button_2_construct(lv_obj_t *parent)
     lv_label_set_text(ui_Label11, "设置");
     lv_obj_set_style_text_font(ui_Label11, &ui_font_chinese16, LV_PART_MAIN | LV_STATE_DEFAULT);
 
-    // events
+    lv_obj_add_event_cb(ui_Button5, event_button_clicked_cb, LV_EVENT_ALL, reinterpret_cast<void *>(3));
+    } // if (wifi_entry)
+
+    // events（原有 3 个入口的注册必须在 if 外面，否则关闭 WiFi 功能时菜单会失灵）
     lv_obj_add_event_cb(ui_Button2, event_button_clicked_cb, LV_EVENT_ALL, reinterpret_cast<void *>(0));
     lv_obj_add_event_cb(ui_Button3, event_button_clicked_cb, LV_EVENT_ALL, reinterpret_cast<void *>(1));
     lv_obj_add_event_cb(ui_Button4, event_button_clicked_cb, LV_EVENT_ALL, reinterpret_cast<void *>(2));
-    lv_obj_add_event_cb(ui_Button5, event_button_clicked_cb, LV_EVENT_ALL, reinterpret_cast<void *>(3));
 }
 
 static void card_menuPage_create()
@@ -211,7 +228,7 @@ void refresh_menu_key()
                 close_for_opening_submenu = false;
                 LOCKLV();
                 card_menuPage_create();
-                lv_anim_size(card_menuPage.obj, MENU_BUTTON_2_BOX_WIDHT, MENU_BUTTON_2_BOX_HEIGHT, 500, 0);
+                lv_anim_size(card_menuPage.obj, menu_box_width(), MENU_BUTTON_2_BOX_HEIGHT, 500, 0);
                 lv_anim_move(card_menuPage.obj, 0, MENU_BUTTON_2_BOX_Y_SHOW, 500, 0);
                 current_mode = MODE_MAINMENU;
                 UNLOCKLV();
@@ -235,6 +252,10 @@ void refresh_menu_key()
             case MODE_WIFI_SETTINGS:
                 // 交给 WiFi 页面自己处理：密码页 → 回列表；列表页 → 关闭
                 menu_wifi_loop(true);
+                break;
+            case MODE_NET_SWITCH:
+                // 隐藏的网络功能开关页：返回到系统设置
+                menu_netswitch_loop(true);
                 break;
             default:
                 break;

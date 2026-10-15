@@ -609,3 +609,83 @@ extern "C" int wifi_load_credentials(char *ssid, size_t n, char *pass, size_t m)
     fclose(f);
     return 0;
 }
+
+/* ================================================================== 网络功能总开关
+ * 默认关闭：/mnt/UDISK/wifi_enabled 里是 1 才算启用。
+ * 关着的时候开机脚本不碰 USB（保持原生 adb+MTP），相机功能完全正常。
+ * 开启时顺手把 usbnet.conf 的 MODE 改成 ecm（BW21 的驱动只认 ECM），并写好控制接口地址。
+ */
+#define NET_FLAG_PATH "/mnt/UDISK/wifi_enabled"
+#define USB_CONF_PATH "/mnt/UDISK/usbnet.conf"
+#define NET_CTL_URL   "http://192.168.2.250:8080"
+
+extern "C" int net_feature_enabled(void)
+{
+	FILE *f = fopen(NET_FLAG_PATH, "r");
+	char b[8] = {0};
+	if (f == NULL) {
+		return 0; /* 没有标记文件 = 默认关闭 */
+	}
+	if (fgets(b, sizeof(b), f) == NULL) {
+		fclose(f);
+		return 0;
+	}
+	fclose(f);
+	return (b[0] == '1') ? 1 : 0;
+}
+
+static void net_conf_set_mode(const char *mode)
+{
+	char buf[4096];
+	size_t n = 0;
+	FILE *f = fopen(USB_CONF_PATH, "r");
+	FILE *o;
+	char *p;
+	int wrote = 0;
+
+	if (f != NULL) {
+		n = fread(buf, 1, sizeof(buf) - 1, f);
+		fclose(f);
+	}
+	buf[n] = 0;
+
+	o = fopen(USB_CONF_PATH, "w");
+	if (o == NULL) {
+		return;
+	}
+	p = buf;
+	while (p != NULL && *p != 0) {
+		char *nl = strchr(p, '\n');
+		size_t len = (nl != NULL) ? (size_t)(nl - p) : strlen(p);
+		if (len >= 5 && strncmp(p, "MODE=", 5) == 0 && !wrote) {
+			fprintf(o, "MODE=%s\n", mode);
+			wrote = 1;
+		} else if (len > 0) {
+			fwrite(p, 1, len, o);
+			fputc('\n', o);
+		}
+		p = (nl != NULL) ? (nl + 1) : NULL;
+	}
+	if (!wrote) {
+		fprintf(o, "MODE=%s\n", mode);
+	}
+	fclose(o);
+}
+
+extern "C" void net_feature_set(int enable)
+{
+	FILE *f = fopen(NET_FLAG_PATH, "w");
+	if (f != NULL) {
+		fprintf(f, "%d\n", enable ? 1 : 0);
+		fclose(f);
+	}
+	/* 开 = 出 ECM 网卡；关 = 不出网卡，USB 口回到原生 adb+MTP */
+	net_conf_set_mode(enable ? "ecm" : "off");
+
+	/* 控制接口地址（相机界面用它指挥 BW21） */
+	f = fopen(WIFI_CTL_PATH, "w");
+	if (f != NULL) {
+		fprintf(f, "%s\n", NET_CTL_URL);
+		fclose(f);
+	}
+}

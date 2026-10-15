@@ -72,9 +72,11 @@ void crosshair_settings_hide();
 bool crosshair_settings_is_open();
 bool system_crosshair_option_focused();
 bool system_brightness_option_focused();
+bool system_noiseclear_option_focused();
 
 // 隐藏相册（dcim2）：在系统设置亮度条上按录像键进入
 void menu_hidden_gallery_show();
+void menu_system_show();
 void menu_system_hide();
 
 // WiFi 网络设置页（主菜单第 4 项）
@@ -83,6 +85,12 @@ void menu_wifi_hide();
 void menu_wifi_loop(bool go_back);
 bool menu_wifi_is_open();
 bool menu_wifi_password_open();
+
+// 隐藏的网络功能开关页（系统设置里「手动清除噪声」上按录像键进入）
+void menu_netswitch_show();
+void menu_netswitch_hide();
+void menu_netswitch_loop(bool go_back);
+bool menu_netswitch_is_open();
 
 /// @brief 相册事件检查
 /// @param has_hal_go_back_event 如果为true，代表返回（菜单）按键按下

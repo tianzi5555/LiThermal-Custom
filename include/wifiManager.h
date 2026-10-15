@@ -79,6 +79,12 @@ int wifi_save_credentials(const char *ssid, const char *pass);
 int wifi_load_credentials(char *ssid, size_t n, char *pass, size_t m);
 const char *wifi_control_base(void);
 
+// ---- 网络功能总开关（隐藏页里控制） ----
+// 默认关闭：关着时完全不碰 USB（保持原生 adb+MTP），相机功能正常。
+// 开启时把 /mnt/UDISK/usbnet.conf 的 MODE 改成 ecm、写好控制接口地址，重启后生效。
+int net_feature_enabled(void);
+void net_feature_set(int enable);
+
 #ifdef __cplusplus
 }
 #endif

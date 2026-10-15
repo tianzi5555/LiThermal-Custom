@@ -8,6 +8,13 @@ static int factory_reset_cnt;
 static lv_obj_t *ui_Switch2;
 static lv_obj_t *ui_Checkbox6;
 static lv_obj_t *ui_Checkbox7;
+static lv_obj_t *ui_ButtonNoiseClear = NULL; // 「手动清除噪声」按钮：在它上面按录像键进隐藏的网络功能开关页
+
+bool system_noiseclear_option_focused()
+{
+    return (ui_ButtonNoiseClear != NULL && lv_obj_is_valid(ui_ButtonNoiseClear) &&
+            lv_group_get_focused(lv_group_get_default()) == ui_ButtonNoiseClear);
+}
 
 bool system_crosshair_option_focused()
 {
@@ -109,6 +116,7 @@ static void card_menu_system_construct(lv_obj_t *parent)
     lv_obj_set_align(ui_Label12, LV_ALIGN_CENTER);
     lv_label_set_text(ui_Label12, "手动清除噪声");
     lv_obj_set_style_text_font(ui_Label12, &ui_font_chinese16, LV_PART_MAIN | LV_STATE_DEFAULT);
+    ui_ButtonNoiseClear = ui_Button1; // 记下来，供「录像键进隐藏页」判断焦点
 
     lv_obj_t *ui_Button6 = lv_btn_create(parent);
     lv_obj_set_width(ui_Button6, 120);
