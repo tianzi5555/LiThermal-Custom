@@ -85,7 +85,7 @@ static void probe_backend(void)
         if (res && res->status == 200)
         {
             g_st.backend = WIFI_BACKEND_BW21;
-            SET_STATUS("BW21 control API %s", g_ctl);
+            SET_STATUS("已连接 BW21 控制接口 %s", g_ctl);
             return;
         }
     }
@@ -96,12 +96,12 @@ static void probe_backend(void)
     if (access("/sys/class/net/" WIFI_LOCAL_IF, F_OK) == 0)
     {
         g_st.backend = WIFI_BACKEND_LOCAL;
-        SET_STATUS("using local %s", WIFI_LOCAL_IF);
+        SET_STATUS("使用本机 %s", WIFI_LOCAL_IF);
         return;
     }
     // 3) 演示模式
     g_st.backend = WIFI_BACKEND_DEMO;
-    SET_STATUS("no backend (BW21) - demo data");
+    SET_STATUS("未找到网络后端（BW21），当前为演示数据");
 }
 
 // ---------------------------------------------------------------- DEMO 数据
@@ -135,13 +135,13 @@ static void scan_demo(void)
 static void connect_demo(const char *ssid, const char *pass)
 {
     (void)pass;
-    SET_STATUS("demo: connecting %s ...", ssid);
+    SET_STATUS("演示：正在模拟连接 %s ...", ssid);
     g_st.conn_state = WIFI_ST_CONNECTING;
     usleep(1200 * 1000);
     str_copy(g_st.connected_ssid, WIFI_SSID_LEN, ssid);
     str_copy(g_st.ip, sizeof(g_st.ip), "192.168.42.2");
     g_st.conn_state = WIFI_ST_CONNECTED;
-    SET_STATUS("demo: simulated %s (no real link)", ssid);
+    SET_STATUS("演示：已模拟连接 %s（未真正联网）", ssid);
 }
 
 // ---------------------------------------------------------------- BW21 后端
@@ -153,15 +153,15 @@ static void scan_bw21(void)
     auto res = cli.Get("/api/wifi/scan");
     if (!res || res->status != 200)
     {
-        SET_ERR("scan failed: %s", res ? "HTTP error" : "cannot reach BW21");
-        SET_STATUS("scan failed: BW21 no response");
+        SET_ERR("扫描失败：%s", res ? "HTTP 错误" : "连不上 BW21");
+        SET_STATUS("扫描失败：BW21 无响应");
         return;
     }
     cJSON *root = cJSON_Parse(res->body.c_str());
     if (!root)
     {
-        SET_ERR("scan result is not valid JSON");
-        SET_STATUS("scan failed: bad response");
+        SET_ERR("扫描结果不是合法 JSON");
+        SET_STATUS("扫描失败：返回格式错误");
         return;
     }
     int n = 0;
@@ -188,7 +188,7 @@ static void scan_bw21(void)
     cJSON_Delete(root);
     g_st.ap_count = n;
     g_st.scan_seq++;
-    SET_STATUS("scan done, %d AP", n);
+    SET_STATUS("扫描完成，共 %d 个网络", n);
 }
 
 static void connect_bw21(const char *ssid, const char *pass)
@@ -208,13 +208,13 @@ static void connect_bw21(const char *ssid, const char *pass)
     {
         g_st.conn_state = WIFI_ST_CONNECTING;
         str_copy(g_st.connected_ssid, WIFI_SSID_LEN, ssid);
-        SET_STATUS("password sent to BW21 for %s", ssid);
+        SET_STATUS("已把 %s 的密码交给 BW21，正在连接 ...", ssid);
     }
     else
     {
         g_st.conn_state = WIFI_ST_FAILED;
-        SET_ERR("BW21 refused connect request");
-        SET_STATUS("connect failed: BW21 no response");
+        SET_ERR("BW21 未接受连接请求");
+        SET_STATUS("连接失败：BW21 无响应");
     }
 }
 
@@ -240,22 +240,22 @@ static void status_bw21(void)
             str_copy(g_st.connected_ssid, WIFI_SSID_LEN, jssid->valuestring);
         if (jip && jip->valuestring)
             str_copy(g_st.ip, sizeof(g_st.ip), jip->valuestring);
-        SET_STATUS("connected %s  IP %s", g_st.connected_ssid, g_st.ip);
+        SET_STATUS("已连接 %s  地址 %s", g_st.connected_ssid, g_st.ip);
     }
     else if (strcmp(state, "connecting") == 0)
     {
         g_st.conn_state = WIFI_ST_CONNECTING;
-        SET_STATUS("connecting %s ...", (jssid && jssid->valuestring) ? jssid->valuestring : "");
+        SET_STATUS("正在连接 %s ...", (jssid && jssid->valuestring) ? jssid->valuestring : "");
     }
     else if (strcmp(state, "failed") == 0)
     {
         g_st.conn_state = WIFI_ST_FAILED;
-        SET_STATUS("connect failed (bad password / weak signal)");
+        SET_STATUS("连接失败（密码错或信号太弱）");
     }
     else
     {
         g_st.conn_state = WIFI_ST_IDLE;
-        SET_STATUS("not connected");
+        SET_STATUS("未连接 WiFi");
     }
     cJSON_Delete(root);
 }
@@ -269,8 +269,8 @@ static void scan_local(void)
     sleep(2);
     if (run_cmd("wpa_cli -i " WIFI_LOCAL_IF " scan_results 2>/dev/null", buf, sizeof(buf)) != 0)
     {
-        SET_ERR("wpa_cli failed");
-        SET_STATUS("scan failed: no wpa_cli");
+        SET_ERR("wpa_cli 执行失败");
+        SET_STATUS("扫描失败：wpa_cli 不可用");
         return;
     }
     int n = 0;
@@ -313,7 +313,7 @@ static void scan_local(void)
     }
     g_st.ap_count = n;
     g_st.scan_seq++;
-    SET_STATUS("scan done, %d AP", n);
+    SET_STATUS("扫描完成，共 %d 个网络", n);
 }
 
 static void connect_local(const char *ssid, const char *pass)
@@ -323,8 +323,8 @@ static void connect_local(const char *ssid, const char *pass)
     if (!f)
     {
         g_st.conn_state = WIFI_ST_FAILED;
-        SET_ERR("cannot write /etc/wpa_supplicant.conf");
-        SET_STATUS("connect failed: config not writable");
+        SET_ERR("无法写 wpa 配置文件");
+        SET_STATUS("连接失败：配置不可写");
         return;
     }
     fprintf(f, "ctrl_interface=/var/log/wpa_supplicant\nupdate_config=1\n");
@@ -340,7 +340,7 @@ static void connect_local(const char *ssid, const char *pass)
     run_cmd(cmd, NULL, 0);
     g_st.conn_state = WIFI_ST_CONNECTING;
     str_copy(g_st.connected_ssid, WIFI_SSID_LEN, ssid);
-    SET_STATUS("connecting %s ...", ssid);
+    SET_STATUS("正在连接 %s ...", ssid);
     sleep(6);
     snprintf(cmd, sizeof(cmd), "udhcpc -i " WIFI_LOCAL_IF " -n -q -t 5 -T 3 >/dev/null 2>&1");
     run_cmd(cmd, NULL, 0);
@@ -371,12 +371,12 @@ static void status_local(void)
                 ip[--L] = 0;
             str_copy(g_st.ip, sizeof(g_st.ip), ip);
         }
-        SET_STATUS("connected %s  IP %s", g_st.connected_ssid, g_st.ip);
+        SET_STATUS("已连接 %s  地址 %s", g_st.connected_ssid, g_st.ip);
     }
     else
     {
         g_st.conn_state = WIFI_ST_IDLE;
-        SET_STATUS("not connected");
+        SET_STATUS("未连接 WiFi");
     }
 }
 
@@ -452,7 +452,7 @@ static void *wifi_worker(void *)
         if (dc)
         {
             g_st.conn_state = WIFI_ST_IDLE;
-            SET_STATUS("disconnected");
+            SET_STATUS("已断开");
         }
         if (sc)
             do_scan();
@@ -499,7 +499,7 @@ extern "C" void wifi_init(const char *ctl_base)
     memset(&g_st, 0, sizeof(g_st));
     g_st.backend = WIFI_BACKEND_NONE;
     g_st.conn_state = WIFI_ST_IDLE;
-    str_copy(g_st.status, sizeof(g_st.status), "detecting backend ...");
+    str_copy(g_st.status, sizeof(g_st.status), "正在检测网络后端 ...");
     if (!g_worker_started)
     {
         g_worker_started = 1;
@@ -528,11 +528,11 @@ extern "C" const char *wifi_backend_name(int backend)
     case WIFI_BACKEND_BW21:
         return "BW21";
     case WIFI_BACKEND_LOCAL:
-        return "local";
+        return "本机 WiFi";
     case WIFI_BACKEND_DEMO:
-        return "demo";
+        return "演示";
     default:
-        return "none";
+        return "无";
     }
 }
 

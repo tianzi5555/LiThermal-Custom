@@ -48,7 +48,8 @@ static lv_obj_t *btn_page = NULL;
 static lv_obj_t *kb_keys[KB_ROWS * KB_COLS];
 
 static char cur_ssid[WIFI_SSID_LEN] = "";
-static int kb_page = 0; // 0=abc+digits 1=ABC+symbols 2=symbols
+static int pass_mode = 0; // 0=输入密码 1=输入 SSID（手动添加隐藏网络用同一个键盘）
+static int kb_page = 0;   // 0=abc+digits 1=ABC+symbols 2=symbols
 static uint32_t shown_scan_seq = 0;
 static uint32_t shown_status_seq = 0;
 static uint32_t last_ui_ms = 0;
@@ -81,10 +82,10 @@ static const char *const *kb_page_map(int page)
 static const char *kb_page_name(int page)
 {
     if (page == 1)
-        return "ABC";
+        return "大写";
     if (page == 2)
-        return "!@#";
-    return "abc";
+        return "符号";
+    return "小写";
 }
 
 // ---------------------------------------------------------------- 小工具
@@ -104,7 +105,7 @@ static lv_obj_t *make_btn(lv_obj_t *parent, const char *text, lv_coord_t x, lv_c
     lv_obj_t *lab = lv_label_create(btn);
     lv_label_set_text(lab, text);
     lv_obj_set_align(lab, LV_ALIGN_CENTER);
-    lv_obj_set_style_text_font(lab, &ui_font_chinese16, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_font(lab, &ui_font_cn16, LV_PART_MAIN | LV_STATE_DEFAULT);
     return btn;
 }
 
@@ -131,7 +132,7 @@ static void hide_page(lv_obj_t *p, bool hide)
 static void pass_update_len(void)
 {
     if (lbl_len && lv_obj_is_valid(lbl_len) && ta_pass && lv_obj_is_valid(ta_pass))
-        lv_label_set_text_fmt(lbl_len, "len=%d", (int)strlen(lv_textarea_get_text(ta_pass)));
+        lv_label_set_text_fmt(lbl_len, "已输入 %d 个字符", (int)strlen(lv_textarea_get_text(ta_pass)));
 }
 
 static void kb_key_cb(lv_event_t *e)
@@ -163,7 +164,7 @@ static void pass_back_cb(lv_event_t *e)
     hide_page(page_list, false);
     pass_open = false;
     if (lbl_title && lv_obj_is_valid(lbl_title))
-        lv_label_set_text(lbl_title, "WiFi setup");
+        lv_label_set_text(lbl_title, "WiFi 网络");
     if (list_cont && lv_obj_is_valid(list_cont) && lv_obj_get_child_cnt(list_cont) > 0)
         lv_group_focus_obj(lv_obj_get_child(list_cont, 0));
 }
@@ -173,10 +174,25 @@ static void pass_connect_cb(lv_event_t *e)
     (void)e;
     if (!ta_pass || !lv_obj_is_valid(ta_pass))
         return;
-    const char *pass = lv_textarea_get_text(ta_pass);
+    const char *txt = lv_textarea_get_text(ta_pass);
+    // pass_mode==1：这一页其实是在输入 SSID（手动添加隐藏网络），输完再进密码页
+    if (pass_mode == 1)
+    {
+        if (txt && txt[0])
+        {
+            strncpy(cur_ssid, txt, WIFI_SSID_LEN - 1);
+            cur_ssid[WIFI_SSID_LEN - 1] = 0;
+            pass_mode = 0;
+            lv_textarea_set_text(ta_pass, "");
+            pass_update_len();
+            if (lbl_title && lv_obj_is_valid(lbl_title))
+                lv_label_set_text_fmt(lbl_title, "密码：%.24s", cur_ssid);
+        }
+        return;
+    }
     if (lbl_status && lv_obj_is_valid(lbl_status))
-        lv_label_set_text(lbl_status, "Sending password to BW21...");
-    wifi_connect(cur_ssid, pass ? pass : "");
+        lv_label_set_text(lbl_status, "正在把密码交给 BW21 ...");
+    wifi_connect(cur_ssid, txt ? txt : "");
     pass_back_cb(NULL);
 }
 
@@ -224,12 +240,12 @@ static void pass_page_build(void)
     lv_textarea_set_max_length(ta_pass, WIFI_PASS_LEN - 1);
     lv_obj_set_size(ta_pass, PAGE_W - 2, 30);
     lv_obj_set_pos(ta_pass, 0, 0);
-    lv_obj_set_style_text_font(ta_pass, &ui_font_chinese16, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_font(ta_pass, &ui_font_cn16, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_group_remove_obj(ta_pass); // 只作显示，脱离焦点链
 
     lbl_len = lv_label_create(page_pass);
     lv_obj_set_pos(lbl_len, 2, 32);
-    lv_obj_set_style_text_font(lbl_len, &ui_font_chinese16, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_font(lbl_len, &ui_font_cn16, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_text_color(lbl_len, lv_color_hex(0x9AA7B4), LV_PART_MAIN | LV_STATE_DEFAULT);
 
     // 40 个字符键
@@ -254,15 +270,15 @@ static void pass_page_build(void)
     b = make_btn(page_pass, kb_page_name(kb_page), 0, y, bw, 26);
     lv_obj_add_event_cb(b, kb_page_cb, LV_EVENT_CLICKED, NULL);
     btn_page = b;
-    b = make_btn(page_pass, "Space", (bw + gap) * 1, y, bw, 26);
+    b = make_btn(page_pass, "空格", (bw + gap) * 1, y, bw, 26);
     lv_obj_add_event_cb(b, kb_space_cb, LV_EVENT_CLICKED, NULL);
-    b = make_btn(page_pass, "Del", (bw + gap) * 2, y, bw, 26);
+    b = make_btn(page_pass, "删", (bw + gap) * 2, y, bw, 26);
     lv_obj_add_event_cb(b, kb_backspace_cb, LV_EVENT_CLICKED, NULL);
-    b = make_btn(page_pass, "Clear", (bw + gap) * 3, y, bw, 26);
+    b = make_btn(page_pass, "清空", (bw + gap) * 3, y, bw, 26);
     lv_obj_add_event_cb(b, kb_clear_cb, LV_EVENT_CLICKED, NULL);
-    b = make_btn(page_pass, "Back", (bw + gap) * 4, y, bw, 26);
+    b = make_btn(page_pass, "返回", (bw + gap) * 4, y, bw, 26);
     lv_obj_add_event_cb(b, pass_back_cb, LV_EVENT_CLICKED, NULL);
-    b = make_btn(page_pass, "OK", (bw + gap) * 5, y, bw, 26);
+    b = make_btn(page_pass, "连接", (bw + gap) * 5, y, bw, 26);
     lv_obj_set_style_bg_color(b, lv_color_hex(0x1F7A4D), LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_add_event_cb(b, pass_connect_cb, LV_EVENT_CLICKED, NULL);
 
@@ -276,15 +292,31 @@ static void pass_page_open(const char *ssid, bool secure)
     if (!secure)
     {
         if (lbl_status && lv_obj_is_valid(lbl_status))
-            lv_label_set_text(lbl_status, "Open network, connecting...");
+            lv_label_set_text(lbl_status, "开放网络，直接连接 ...");
         wifi_connect(cur_ssid, "");
         return;
     }
     hide_page(page_list, true);
     pass_page_build();
     pass_open = true;
+    pass_mode = 0;
     if (lbl_title && lv_obj_is_valid(lbl_title))
-        lv_label_set_text_fmt(lbl_title, "Pass: %.24s", cur_ssid);
+        lv_label_set_text_fmt(lbl_title, "密码：%.24s", cur_ssid);
+    if (ta_pass && lv_obj_is_valid(ta_pass))
+        lv_textarea_set_text(ta_pass, "");
+    pass_update_len();
+}
+
+// 手动添加（隐藏网络）：先用同一个键盘输 SSID，再进密码页
+static void pass_page_open_manual_ssid(void)
+{
+    hide_page(page_list, true);
+    pass_page_build();
+    pass_open = true;
+    pass_mode = 1;
+    cur_ssid[0] = 0;
+    if (lbl_title && lv_obj_is_valid(lbl_title))
+        lv_label_set_text(lbl_title, "输入网络名称");
     if (ta_pass && lv_obj_is_valid(ta_pass))
         lv_textarea_set_text(ta_pass, "");
     pass_update_len();
@@ -320,7 +352,7 @@ static void ap_btn_cb(lv_event_t *e)
     if (lab && lv_obj_is_valid(lab))
     {
         const char *t = lv_label_get_text(lab);
-        if (t && strstr(t, "open"))
+        if (t && strstr(t, "开"))
             secure = false;
     }
     if (ssid && ssid[0])
@@ -331,14 +363,14 @@ static void rescan_cb(lv_event_t *e)
 {
     (void)e;
     if (lbl_status && lv_obj_is_valid(lbl_status))
-        lv_label_set_text(lbl_status, "Scanning...");
+        lv_label_set_text(lbl_status, "正在扫描 ...");
     wifi_request_scan();
 }
 
 static void manual_ssid_cb(lv_event_t *e)
 {
     (void)e;
-    pass_page_open("(manual)", true);
+    pass_page_open_manual_ssid();
 }
 
 static void close_cb(lv_event_t *e)
@@ -358,15 +390,15 @@ static void rebuild_ap_list(const wifi_state_t *st)
     if (st->ap_count <= 0)
     {
         lv_obj_t *lab = lv_label_create(list_cont);
-        lv_label_set_text(lab, st->backend == WIFI_BACKEND_DEMO ? "no demo data" : "no AP found, press Rescan");
-        lv_obj_set_style_text_font(lab, &ui_font_chinese16, LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_label_set_text(lab, st->backend == WIFI_BACKEND_DEMO ? "暂无演示数据" : "没扫到网络，请按重新扫描");
+        lv_obj_set_style_text_font(lab, &ui_font_cn16, LV_PART_MAIN | LV_STATE_DEFAULT);
         return;
     }
     for (int i = 0; i < st->ap_count; i++)
     {
         char text[80];
-        snprintf(text, sizeof(text), "%-22.22s %4d %s",
-                 st->aps[i].ssid, st->aps[i].rssi, st->aps[i].secure ? "lock" : "open");
+        snprintf(text, sizeof(text), "%-18.18s %4d %s",
+                 st->aps[i].ssid, st->aps[i].rssi, st->aps[i].secure ? "密" : "开");
         lv_obj_t *btn = make_btn(list_cont, text, 0, 0, PAGE_W - 12, 28);
         char *ssid_copy = (char *)malloc(WIFI_SSID_LEN);
         if (ssid_copy)
@@ -417,20 +449,20 @@ void menu_wifi_show(void)
     card_wifi.create(lv_layer_top(), 0, WIFI_CARD_Y, WIFI_CARD_W, WIFI_CARD_H, LV_ALIGN_TOP_MID);
     lv_obj_t *root = card_wifi.obj;
     lv_obj_clear_flag(root, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_style_text_font(root, &ui_font_chinese16, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_font(root, &ui_font_cn16, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_pad_all(root, 2, LV_PART_MAIN | LV_STATE_DEFAULT);
 
     lbl_title = lv_label_create(root);
     lv_obj_set_pos(lbl_title, 2, 0);
-    lv_label_set_text(lbl_title, "WiFi setup");
-    lv_obj_set_style_text_font(lbl_title, &ui_font_chinese16, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_label_set_text(lbl_title, "WiFi 网络");
+    lv_obj_set_style_text_font(lbl_title, &ui_font_cn16, LV_PART_MAIN | LV_STATE_DEFAULT);
 
     lbl_status = lv_label_create(root);
     lv_obj_set_pos(lbl_status, 2, 18);
     lv_obj_set_width(lbl_status, WIFI_CARD_W - 24);
     lv_label_set_long_mode(lbl_status, LV_LABEL_LONG_SCROLL_CIRCULAR);
-    lv_label_set_text(lbl_status, "detecting backend...");
-    lv_obj_set_style_text_font(lbl_status, &ui_font_chinese16, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_label_set_text(lbl_status, "正在检测网络后端 ...");
+    lv_obj_set_style_text_font(lbl_status, &ui_font_cn16, LV_PART_MAIN | LV_STATE_DEFAULT);
 
     // 列表页
     page_list = lv_obj_create(root);
@@ -449,9 +481,9 @@ void menu_wifi_show(void)
     lv_obj_set_style_pad_row(list_cont, 3, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_scrollbar_mode(list_cont, LV_SCROLLBAR_MODE_AUTO);
 
-    lv_obj_t *b1 = make_btn(page_list, "Rescan", 0, 146, 96, 30);
-    lv_obj_t *b2 = make_btn(page_list, "Manual", 100, 146, 96, 30);
-    lv_obj_t *b3 = make_btn(page_list, "Close", 200, 146, 96, 30);
+    lv_obj_t *b1 = make_btn(page_list, "重新扫描", 0, 146, 96, 30);
+    lv_obj_t *b2 = make_btn(page_list, "手动输入", 100, 146, 96, 30);
+    lv_obj_t *b3 = make_btn(page_list, "关闭", 200, 146, 96, 30);
     lv_obj_add_event_cb(b1, rescan_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_add_event_cb(b2, manual_ssid_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_add_event_cb(b3, close_cb, LV_EVENT_CLICKED, NULL);
@@ -523,7 +555,7 @@ void menu_wifi_loop(bool go_back)
         {
             LOCKLV();
             if (lbl_status && lv_obj_is_valid(lbl_status))
-                lv_label_set_text(lbl_status, "Scanning...");
+                lv_label_set_text(lbl_status, "正在扫描 ...");
             UNLOCKLV();
             wifi_request_scan();
         }

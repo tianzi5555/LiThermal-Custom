@@ -32,6 +32,7 @@ extern "C"
 #endif
     extern const lv_font_t ui_font_ali24;
     extern const lv_font_t ui_font_chinese16;
+    extern const lv_font_t ui_font_cn16; // 全一些的中文字体（WiFi 设置页用，含 192 个汉字）
     extern const lv_font_t ui_font_fontawesome16;
     extern const lv_font_t ui_font_fontawesome24;
 #ifdef __cplusplus
