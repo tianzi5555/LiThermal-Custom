@@ -1,5 +1,38 @@
 #include "my_main.h"
+#include <execinfo.h>
+#include <signal.h>
+#include <fcntl.h>
+#include <unistd.h>
 pthread_mutex_t lv_mutex;
+
+// 崩溃抓栈：闪退时把调用栈写到 /mnt/UDISK/crash.log，方便定位
+static void crash_signal_handler(int sig)
+{
+    void *bt[40];
+    int n = backtrace(bt, 40);
+    int fd = open("/mnt/UDISK/crash.log", O_CREAT | O_WRONLY | O_APPEND, 0666);
+    if (fd >= 0)
+    {
+        char hdr[96];
+        int len = snprintf(hdr, sizeof(hdr), "\n=== LiThermal crash: signal %d ===\n", sig);
+        if (len > 0)
+            write(fd, hdr, (size_t)len);
+        backtrace_symbols_fd(bt, n, fd);
+        fsync(fd);
+        close(fd);
+    }
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
+static void install_crash_handler(void)
+{
+    signal(SIGSEGV, crash_signal_handler);
+    signal(SIGABRT, crash_signal_handler);
+    signal(SIGBUS, crash_signal_handler);
+    signal(SIGILL, crash_signal_handler);
+    signal(SIGFPE, crash_signal_handler);
+}
 
 /// @brief 热成像刷新线程
 pthread_t thread_app;
@@ -70,6 +103,7 @@ void *thread_center_temp_func(void *)
 
 int main()
 {
+    install_crash_handler();
     sleep(1); // Why?
     system("mkdir " GALLERY_PATH);
     system("mkdir " GALLERY2_PATH);
