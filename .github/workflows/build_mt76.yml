@@ -76,7 +76,15 @@ jobs:
           grep -E '^CONFIG_MT76' .config || echo "(还没有 MT76 符号)"
 
           # 第二遍：本内核的符号名是 MT76_CORE / MT76_USB / MT76x02_USB / MT76x2_COMMON / MT76x2U
+          echo "--- 写入前 .config 里的 MT76 行："
+          grep -n 'MT76' .config || echo "(无)"
           ./scripts/config --module MT76x2U
+          echo "--- scripts/config 写入后："
+          grep -n 'MT76x2U' .config || echo "!! scripts/config 根本没写进去"
+          echo "--- Kconfig 里 MT76x2U 的定义与依赖："
+          grep -rn -A8 '^config MT76x2U' drivers/net/wireless/mediatek/ || true
+          echo "--- 当前 MAC80211 / USB："
+          grep -E '^CONFIG_(MAC80211|USB)=' .config || true
           ./scripts/config --module MT76x2_COMMON
           ./scripts/config --module MT76x02_USB
           ./scripts/config --module MT76_USB
@@ -86,6 +94,8 @@ jobs:
           ./scripts/config --module AVERAGE || true
           ./scripts/config --module CRYPTO_GCM || true
           make olddefconfig
+          echo "--- olddefconfig 之后："
+          grep -n 'MT76' .config || echo "(MT76 行全没了)"
 
           echo "=== 关键项 ==="
           grep -E '^(CONFIG_WLAN_VENDOR_MEDIATEK|CONFIG_MAC80211|CONFIG_MT76|CONFIG_CFG80211|CONFIG_RFKILL)=' .config || true
