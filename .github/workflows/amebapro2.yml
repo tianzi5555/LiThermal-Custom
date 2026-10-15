@@ -9,9 +9,9 @@ on:
   workflow_dispatch:
     inputs:
       example:
-        description: '要编译的例程名（先用官方 usbh_cdc_ecm_new 验证工具链）'
+        description: '要编译的例程名（默认 LiThermal 自定义网关；填 usbh_cdc_ecm_new 可编官方例程）'
         required: false
-        default: 'usbh_cdc_ecm_new'
+        default: 'li_thermal_gw'
   push:
     branches: [ "main" ]
     paths:
@@ -60,13 +60,15 @@ jobs:
             echo "bw21/example 不存在，用官方例程原样编译"
           fi
 
+      - name: 给 lwIP 打补丁（代理 ARP + 主机路由 + IP_FORWARD）
+        run: |
+          python3 bw21/tools/apply_patches.py sdk
+
       - name: 编译
         run: |
           export PATH="$HOME/toolchain/asdk-10.3.0/linux/newlib/bin:$PATH"
-          which arm-none-eabi-gcc || true
-          arm-none-eabi-gcc --version | head -1 || true
           EXAMPLE="${{ github.event.inputs.example }}"
-          if [ -z "$EXAMPLE" ]; then EXAMPLE="usbh_cdc_ecm_new"; fi
+          if [ -z "$EXAMPLE" ]; then EXAMPLE="li_thermal_gw"; fi
           echo "EXAMPLE=$EXAMPLE"
           cd sdk/project/realtek_amebapro2_v0_example/GCC-RELEASE
           mkdir -p build && cd build
@@ -74,7 +76,7 @@ jobs:
             -DCMAKE_TOOLCHAIN_FILE=../toolchain.cmake \
             -DEXAMPLE="$EXAMPLE" \
             -Dusb_stack=new
-          cmake --build . --target flash -j"$(nproc)" 2>&1 | tail -80
+          cmake --build . --target flash -j"$(nproc)" 2>&1 | tail -120
           echo "===== 产物 ====="
           ls -l ./*.bin || true
 
@@ -152,6 +154,17 @@ jobs:
           path: |
             sdk/project/realtek_amebapro2_v0_example/GCC-RELEASE/build/flash_ntz.bin
             sdk/project/realtek_amebapro2_v0_example/GCC-RELEASE/build/flash_ntz.nn.bin
+          if-no-files-found: warn
+
+      - name: 上传烧录工具（Windows 用 uartfwburn.exe）
+        uses: actions/upload-artifact@v4
+        with:
+          name: bw21-flash-tool
+          path: |
+            sdk/tools/image_tool/**/uartfwburn.exe
+            sdk/tools/image_tool/**/uartfwburn.linux
+            sdk/tools/image_tool/**/Readme.md
+            sdk/tools/image_tool/**/*.md
           if-no-files-found: warn
 
       - name: 上传源码包（给本地分析用）
