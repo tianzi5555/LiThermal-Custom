@@ -1,0 +1,139 @@
+name: Build BW21 USB-NIC firmware
+
+# 给 BW21-CBV-Kit（RTL8735B / AmebaPro2）编译「USB 网卡网关」固件
+#   - SDK 与工具链都在云端下载（本机访问 GitHub 太慢）
+#   - 产出 flash_ntz.bin，用官方 uartfwburn 烧进 BW21
+#
+# 手动触发：Actions → Build BW21 USB-NIC firmware → Run workflow
+on:
+  workflow_dispatch:
+    inputs:
+      example:
+        description: '要编译的例程名（先用官方 usbh_cdc_ecm_new 验证工具链）'
+        required: false
+        default: 'usbh_cdc_ecm_new'
+  push:
+    branches: [ "main" ]
+    paths:
+      - "bw21/**"
+      - ".github/workflows/amebapro2.yml"
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout this repo
+        uses: actions/checkout@v4
+
+      - name: 安装依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake ninja-build git wget curl \
+            libssl-dev libncurses5-dev python3 python3-pip dos2unix unzip
+
+      - name: 下载 AmebaPro2 SDK
+        run: |
+          git clone --depth 1 https://github.com/Ameba-AIoT/ameba-rtos-pro2.git sdk
+          du -sh sdk
+
+      - name: 下载 ameba 工具链 (asdk-10.3.0)
+        run: |
+          mkdir -p "$HOME/toolchain"
+          wget -q --show-progress -O /tmp/asdk.tar.bz2 \
+            "https://github.com/Ameba-AIoT/ameba-toolchain/releases/download/V10.3.0-amebe-rtos-pro2/asdk-10.3.0-linux-newlib-build-3638-x86_64.tar.bz2"
+          tar -xjf /tmp/asdk.tar.bz2 -C "$HOME/toolchain"
+          ls "$HOME/toolchain"
+          ls "$HOME/toolchain/asdk-10.3.0/linux/newlib/bin" | head -20
+
+      - name: 放入自定义例程（如果仓库里有）
+        run: |
+          if [ -d bw21/example ]; then
+            for d in bw21/example/*/; do
+              name=$(basename "$d")
+              echo ">> 覆盖/新增例程: $name"
+              rm -rf "sdk/component/example/$name"
+              cp -r "$d" "sdk/component/example/$name"
+            done
+            ls sdk/component/example | grep -i li_ || true
+          else
+            echo "bw21/example 不存在，用官方例程原样编译"
+          fi
+
+      - name: 编译
+        run: |
+          export PATH="$HOME/toolchain/asdk-10.3.0/linux/newlib/bin:$PATH"
+          which arm-none-eabi-gcc || true
+          arm-none-eabi-gcc --version | head -1 || true
+          EXAMPLE="${{ github.event.inputs.example }}"
+          if [ -z "$EXAMPLE" ]; then EXAMPLE="usbh_cdc_ecm_new"; fi
+          echo "EXAMPLE=$EXAMPLE"
+          cd sdk/project/realtek_amebapro2_v0_example/GCC-RELEASE
+          mkdir -p build && cd build
+          cmake .. -G"Unix Makefiles" \
+            -DCMAKE_TOOLCHAIN_FILE=../toolchain.cmake \
+            -DEXAMPLE="$EXAMPLE" \
+            -Dusb_stack=new
+          cmake --build . --target flash -j"$(nproc)" 2>&1 | tail -80
+          echo "===== 产物 ====="
+          ls -l ./*.bin || true
+
+      - name: 导出关键源码（供本地阅读，避免本机拉 SDK）
+        run: |
+          set -e
+          OUT=sdk_dump
+          mkdir -p $OUT
+          cp -r sdk/component/example/usbh_cdc_ecm_new $OUT/ 2>/dev/null || true
+          cp -r sdk/component/example/usbh_composite_cdc_acm_ecm_new $OUT/ 2>/dev/null || true
+          cp -r sdk/component/example/httpd $OUT/ 2>/dev/null || true
+          mkdir -p $OUT/usb/host/cdc_ecm $OUT/usb/common $OUT/lwip_api $OUT/network
+          cp -r sdk/component/usb/usb_stack/v1.0.0/host/cdc_ecm/* $OUT/usb/host/cdc_ecm/ 2>/dev/null || true
+          cp sdk/component/usb/usb_stack/v1.0.0/common/*.h $OUT/usb/common/ 2>/dev/null || true
+          cp sdk/component/lwip/api/lwip_netconf.* $OUT/lwip_api/ 2>/dev/null || true
+          cp sdk/component/lwip/api/lwipconf.h $OUT/lwip_api/ 2>/dev/null || true
+          cp -r sdk/component/network/dhcp $OUT/network/ 2>/dev/null || true
+          cp -r sdk/component/network/httpd $OUT/network/ 2>/dev/null || true
+          mkdir -p $OUT/lwip_core
+          cp sdk/component/lwip/lwip_v2.1.2/src/core/ipv4/ip4.c $OUT/lwip_core/ 2>/dev/null || true
+          cp sdk/component/lwip/lwip_v2.1.2/src/core/ipv4/etharp.c $OUT/lwip_core/ 2>/dev/null || true
+          cp sdk/component/lwip/lwip_v2.1.2/src/include/lwip/opt.h $OUT/lwip_core/ 2>/dev/null || true
+          mkdir -p $OUT/proj
+          cp sdk/project/realtek_amebapro2_v0_example/GCC-RELEASE/CMakeLists.txt $OUT/proj/ 2>/dev/null || true
+          cp sdk/project/realtek_amebapro2_v0_example/GCC-RELEASE/application/application.cmake $OUT/proj/ 2>/dev/null || true
+          cp sdk/project/realtek_amebapro2_v0_example/GCC-RELEASE/config.cmake $OUT/proj/ 2>/dev/null || true
+          find sdk/component/example -maxdepth 1 -type d | sort > $OUT/example_list.txt
+          find sdk/component -maxdepth 2 -type d -iname '*wifi*' -o -maxdepth 2 -type d -iname '*http*' | sort > $OUT/dir_hints.txt
+          # 关键 API / 宏 的位置
+          {
+            echo "=== IP_FORWARD / NAT 相关 ==="
+            grep -rn "IP_FORWARD\|LWIP_IPV4_NAT\|ip4_nat" sdk/component/lwip/lwip_v2.1.2/src/include/lwip/opt.h | head -20
+            echo "=== dhcps API ==="
+            grep -n "dhcps_\|dns_server" sdk/component/network/dhcp/*.h | head -40
+            echo "=== LwIP_SetIP / LwIP_DHCP / NET_IF_NUM ==="
+            grep -n "LwIP_SetIP\|LwIP_DHCP\|NET_IF_NUM\|ETHERNET_IDX\|netifapi_netif_set_default" sdk/component/lwip/api/lwip_netconf.h sdk/component/lwip/api/lwip_netconf.c | head -40
+            echo "=== wifi 连接/扫描 API ==="
+            grep -rn "int wifi_connect\|wifi_scan\|wext_scan\|wifi_set_autoreconnect\|wifi_get_join_status\|rtw_wifi" sdk/component/wifi/api/*.h sdk/component/wifi/*.h 2>/dev/null | head -40
+            echo "=== httpd ==="
+            ls sdk/component/network/httpd 2>/dev/null || find sdk/component -maxdepth 3 -type d -iname 'httpd*' | head
+            echo "=== usbh_cdc_ecm 头文件 API ==="
+            grep -n "usbh_cdc_ecm_\|usbh_start\|usbh_init\|usbh_config" sdk/component/usb/usb_stack/v1.0.0/host/cdc_ecm/usbh_cdc_ecm.h sdk/component/usb/usb_stack/v1.0.0/host/core/usbh.h 2>/dev/null | head -60
+          } > $OUT/api_hints.txt 2>&1
+          du -sh $OUT
+          tar -czf sdk_dump.tar.gz $OUT
+          ls -l sdk_dump.tar.gz
+
+      - name: 上传固件
+        uses: actions/upload-artifact@v4
+        with:
+          name: bw21-flash_ntz
+          path: |
+            sdk/project/realtek_amebapro2_v0_example/GCC-RELEASE/build/flash_ntz.bin
+            sdk/project/realtek_amebapro2_v0_example/GCC-RELEASE/build/flash_ntz.nn.bin
+          if-no-files-found: warn
+
+      - name: 上传源码包（给本地分析用）
+        uses: actions/upload-artifact@v4
+        with:
+          name: bw21-sdk-dump
+          path: sdk_dump.tar.gz
+          if-no-files-found: warn
