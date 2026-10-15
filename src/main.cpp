@@ -1,23 +1,25 @@
 #include "my_main.h"
-#include <execinfo.h>
 #include <signal.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <stdio.h>
+#include <string.h>
 pthread_mutex_t lv_mutex;
 
-// 崩溃抓栈：闪退时把调用栈写到 /mnt/UDISK/crash.log，方便定位
-static void crash_signal_handler(int sig)
+// 崩溃记录：Tina 的 uClibc 没有 execinfo.h/backtrace，所以只记信号 + 出错地址，
+// 配合 uiTrace（/mnt/UDISK/ui.log 分步日志）就能定位崩在哪一步。
+static void crash_signal_handler(int sig, siginfo_t *si, void *uctx)
 {
-    void *bt[40];
-    int n = backtrace(bt, 40);
+    (void)uctx;
     int fd = open("/mnt/UDISK/crash.log", O_CREAT | O_WRONLY | O_APPEND, 0666);
     if (fd >= 0)
     {
-        char hdr[96];
-        int len = snprintf(hdr, sizeof(hdr), "\n=== LiThermal crash: signal %d ===\n", sig);
+        char buf[192];
+        int len = snprintf(buf, sizeof(buf),
+                           "\n=== LiThermal crash: signal %d, fault addr %p ===\n",
+                           sig, (si != NULL) ? si->si_addr : NULL);
         if (len > 0)
-            write(fd, hdr, (size_t)len);
-        backtrace_symbols_fd(bt, n, fd);
+            write(fd, buf, (size_t)len);
         fsync(fd);
         close(fd);
     }
@@ -27,11 +29,15 @@ static void crash_signal_handler(int sig)
 
 static void install_crash_handler(void)
 {
-    signal(SIGSEGV, crash_signal_handler);
-    signal(SIGABRT, crash_signal_handler);
-    signal(SIGBUS, crash_signal_handler);
-    signal(SIGILL, crash_signal_handler);
-    signal(SIGFPE, crash_signal_handler);
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = crash_signal_handler;
+    sa.sa_flags = SA_SIGINFO;
+    sigaction(SIGSEGV, &sa, NULL);
+    sigaction(SIGABRT, &sa, NULL);
+    sigaction(SIGBUS, &sa, NULL);
+    sigaction(SIGILL, &sa, NULL);
+    sigaction(SIGFPE, &sa, NULL);
 }
 
 /// @brief 热成像刷新线程
@@ -104,6 +110,7 @@ void *thread_center_temp_func(void *)
 int main()
 {
     install_crash_handler();
+    ui_trace_reset();
     sleep(1); // Why?
     system("mkdir " GALLERY_PATH);
     system("mkdir " GALLERY2_PATH);

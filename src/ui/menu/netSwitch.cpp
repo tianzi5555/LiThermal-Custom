@@ -8,6 +8,7 @@
 // 开关状态存在 /mnt/UDISK/wifi_enabled，开机脚本 usbnet_boot.sh 会读它。
 
 #include "my_main.h"
+#include "uiTrace.h"
 #include "wifiManager.h"
 
 #define NS_CARD_W 304
@@ -37,9 +38,12 @@ static void ns_update_state_text(void)
 
 static void ns_switch_cb(lv_event_t *e)
 {
+    ui_trace("netswitch: 开关被切换");
     lv_obj_t *sw = (lv_obj_t *)lv_event_get_target(e);
     int on = lv_obj_has_state(sw, LV_STATE_CHECKED) ? 1 : 0;
+    ui_trace("netswitch: net_feature_set(%d) 开始", on);
     net_feature_set(on);
+    ui_trace("netswitch: net_feature_set 完成");
     ns_update_state_text();
 }
 
@@ -62,9 +66,12 @@ static void ns_close_cb(lv_event_t *e)
 
 void menu_netswitch_show(void)
 {
+    ui_trace("netswitch: show() 进入");
     if (ns_open)
         return;
+    ui_trace("netswitch: 建卡");
     card_netswitch.create(lv_layer_top(), 0, NS_CARD_Y, NS_CARD_W, NS_CARD_H, LV_ALIGN_TOP_MID);
+    ui_trace("netswitch: 建卡完成");
     lv_obj_t *root = card_netswitch.obj;
     lv_obj_clear_flag(root, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_text_font(root, &ui_font_cn16, LV_PART_MAIN | LV_STATE_DEFAULT);
@@ -85,11 +92,14 @@ void menu_netswitch_show(void)
     lv_label_set_text(lab, "启用 WiFi 网卡");
     lv_obj_set_style_text_font(lab, &ui_font_cn16, LV_PART_MAIN | LV_STATE_DEFAULT);
 
+    ui_trace("netswitch: 建开关行完成，开始建开关");
     sw_ns = lv_switch_create(row);
     lv_obj_set_size(sw_ns, 56, 28);
     lv_obj_set_align(sw_ns, LV_ALIGN_RIGHT_MID);
+    ui_trace("netswitch: 读开关状态 net_feature_enabled()");
     if (net_feature_enabled())
         lv_obj_add_state(sw_ns, LV_STATE_CHECKED);
+    ui_trace("netswitch: 开关状态=%d", net_feature_enabled());
     lv_obj_add_event_cb(sw_ns, ns_switch_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
     lbl_ns_state = lv_label_create(root);
@@ -127,15 +137,20 @@ void menu_netswitch_show(void)
     lv_obj_set_style_text_font(l2, &ui_font_cn16, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_add_event_cb(b_close, ns_close_cb, LV_EVENT_CLICKED, NULL);
 
+    ui_trace("netswitch: 建按钮完成，刷新状态文字");
     ns_update_state_text();
+    ui_trace("netswitch: 显示卡片");
     card_netswitch.show(CARD_ANIM_FLY_UP);
     ns_open = true;
     // 默认把焦点放在开关上，转轮子/按一下就能切
+    ui_trace("netswitch: 聚焦开关");
     lv_group_focus_obj(sw_ns);
+    ui_trace("netswitch: show() 完成");
 }
 
 void menu_netswitch_hide(void)
 {
+    ui_trace("netswitch: hide()");
     if (!ns_open)
         return;
     sw_ns = NULL;

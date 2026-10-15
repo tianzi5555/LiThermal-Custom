@@ -1,6 +1,7 @@
 // WiFi 后端实现（相机侧）
 // 详见 include/wifiManager.h 的说明。所有网络操作在后台线程执行，UI 只读快照。
 #include "wifiManager.h"
+#include "uiTrace.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -424,7 +425,9 @@ static void do_status(void)
 
 static void *wifi_worker(void *)
 {
+    ui_trace("wifiWorker: 线程启动，探测后端");
     probe_backend();
+    ui_trace("wifiWorker: 后端=%d", (int)g_st.backend);
     if (g_st.backend != WIFI_BACKEND_DEMO)
     {
         do_scan();
@@ -434,6 +437,7 @@ static void *wifi_worker(void *)
     {
         scan_demo();
     }
+    ui_trace("wifiWorker: 首次探测完成，进入等待");
     while (1)
     {
         pthread_mutex_lock(&g_lock);
@@ -447,6 +451,7 @@ static void *wifi_worker(void *)
         g_st.busy = 1;
         pthread_mutex_unlock(&g_lock);
 
+        ui_trace("wifiWorker: 收到命令 scan=%d status=%d connect=%d disc=%d", sc, stt, cn, dc);
         if (cn)
             do_connect(ssid, pass);
         if (dc)
@@ -458,6 +463,7 @@ static void *wifi_worker(void *)
             do_scan();
         if (stt)
             do_status();
+        ui_trace("wifiWorker: 命令处理完成");
 
         pthread_mutex_lock(&g_lock);
         g_st.busy = 0;

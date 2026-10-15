@@ -1,4 +1,5 @@
 #include "myHAL.h"
+#include "uiTrace.h"
 #include "lv_drivers/display/sunxifb.h"
 #include <unistd.h>
 #include <time.h>
@@ -224,10 +225,12 @@ void *thread_hal_func(void *)
                 else if (system_noiseclear_option_focused())
                 {
                     // 「手动清除噪声」上按录像键：进入隐藏的网络功能开关页
+                    ui_trace("myHAL: 录像键+焦点在手动清除噪声 → 打开隐藏页");
                     LOCKLV();
                     menu_system_hide();
                     UNLOCKLV();
                     menu_netswitch_show();
+                    ui_trace("myHAL: 隐藏页已打开，切模式 MODE_NET_SWITCH");
                     current_mode = MODE_NET_SWITCH;
                 }
             }

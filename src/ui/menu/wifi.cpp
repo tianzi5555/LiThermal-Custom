@@ -14,6 +14,7 @@
 // 后端：wifiManager（BW21 控制 API / 本机 wlan0 / 演示数据）
 
 #include "my_main.h"
+#include "uiTrace.h"
 #include "wifiManager.h"
 
 #define WIFI_CARD_W 314
