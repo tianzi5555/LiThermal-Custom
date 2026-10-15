@@ -122,6 +122,15 @@ jobs:
             grep -rn "app_example\|LwIP_Init\|wifi_on(" sdk/project/realtek_amebapro2_v0_example --include=*.c 2>/dev/null | head -30
             echo "=== wifi_structures.h / wifi_constants.h 位置 ==="
             find sdk/component -name "wifi_structures.h" -o -name "wifi_constants.h" 2>/dev/null | head
+            echo "=== USB host 栈目录结构 ==="
+            find sdk/component/usb -maxdepth 4 -type d 2>/dev/null | sort
+            echo "=== 所有 usbh_* 源文件（找有没有 rndis/ncm 主机驱动） ==="
+            find sdk/component/usb -name "usbh_*.c" -o -name "usbh_*.h" 2>/dev/null | sort
+            echo "=== rndis / ncm 关键字出现在哪些文件 ==="
+            grep -rln "RNDIS\|rndis" sdk/component/usb --include=*.c --include=*.h 2>/dev/null | head -20
+            grep -rln "CDC_NCM\|cdc_ncm\|usbh_cdc_ncm" sdk/component/usb --include=*.c --include=*.h 2>/dev/null | head -20
+            echo "=== usb 主机例程列表 ==="
+            find sdk/component/example -maxdepth 1 -type d -name "usbh*" 2>/dev/null | sort
             echo "=== usbh_cdc_ecm 头文件 API ==="
             grep -n "usbh_cdc_ecm_\|usbh_start\|usbh_init\|usbh_config" sdk/component/usb/usb_stack/v1.0.0/host/cdc_ecm/usbh_cdc_ecm.h sdk/component/usb/usb_stack/v1.0.0/host/core/usbh.h 2>/dev/null | head -60
           } > $OUT/api_hints.txt 2>&1
