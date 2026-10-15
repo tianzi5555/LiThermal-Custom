@@ -10,6 +10,10 @@
 #include <unistd.h>
 #include <pthread.h>
 #include <sys/stat.h>
+#include <ifaddrs.h>
+#include <net/if.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
 
 #include "httplib.h"
 #include "cJSON.h"
@@ -24,6 +28,7 @@ static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_cv = PTHREAD_COND_INITIALIZER;
 static pthread_t g_worker;
 static int g_worker_started = 0;
+static int g_auto_connect_done = 0; /* 开机自动用已保存凭据连一次 */
 
 static int g_cmd_scan = 0, g_cmd_status = 0, g_cmd_connect = 0, g_cmd_disconnect = 0;
 static char g_new_ssid[WIFI_SSID_LEN];
@@ -51,6 +56,42 @@ static void str_copy(char *dst, size_t n, const char *src)
         src = "";
     strncpy(dst, src, n - 1);
     dst[n - 1] = 0;
+}
+
+// 把本机各网卡（名字=IP(状态)）拼成一行，用于屏幕/日志诊断
+static void wifi_collect_ifaces(char *out, size_t n)
+{
+    struct ifaddrs *ifa = NULL;
+    struct ifaddrs *p;
+    size_t used = 0;
+
+    if (!out || n == 0)
+        return;
+    out[0] = 0;
+
+    if (getifaddrs(&ifa) != 0)
+    {
+        snprintf(out, n, "(读取网卡失败)");
+        return;
+    }
+    for (p = ifa; p != NULL; p = p->ifa_next)
+    {
+        char ip[32];
+        const char *flags;
+        if (p->ifa_addr == NULL || p->ifa_addr->sa_family != AF_INET)
+            continue;
+        if (strcmp(p->ifa_name, "lo") == 0)
+            continue;
+        flags = (p->ifa_flags & IFF_UP) ? "UP" : "DOWN";
+        ip[0] = 0;
+        inet_ntop(AF_INET, &((struct sockaddr_in *)p->ifa_addr)->sin_addr, ip, sizeof(ip));
+        if (used < n)
+            used += (size_t)snprintf(out + used, n - used, "%s%s=%s(%s)",
+                                     used ? " " : "", p->ifa_name, ip[0] ? ip : "noip", flags);
+    }
+    freeifaddrs(ifa);
+    if (out[0] == 0)
+        snprintf(out, n, "(no other iface)");
 }
 
 // 执行命令并收集 stdout（本地后端用）
@@ -87,6 +128,7 @@ static void probe_backend(void)
         {
             g_st.backend = WIFI_BACKEND_BW21;
             SET_STATUS("已连接 BW21 控制接口 %s", g_ctl);
+            ui_trace("probe: BW21 后端 OK (%s)", g_ctl);
             return;
         }
     }
@@ -100,9 +142,14 @@ static void probe_backend(void)
         SET_STATUS("使用本机 %s", WIFI_LOCAL_IF);
         return;
     }
-    // 3) 演示模式
-    g_st.backend = WIFI_BACKEND_DEMO;
-    SET_STATUS("未找到网络后端（BW21），当前为演示数据");
+    // 3) 都没戏：把本机网卡状态一起报出来，方便在相机屏幕上一眼看出问题
+    {
+        char info[160];
+        wifi_collect_ifaces(info, sizeof(info));
+        ui_trace("probe: 未找到后端 %s；本机网卡: %s", g_ctl, info);
+        g_st.backend = WIFI_BACKEND_DEMO;
+        SET_STATUS("未找到 BW21 后端(%s)\n本机网卡: %s", g_ctl, info);
+    }
 }
 
 // ---------------------------------------------------------------- DEMO 数据
@@ -438,32 +485,81 @@ static void *wifi_worker(void *)
         scan_demo();
     }
     ui_trace("wifiWorker: 首次探测完成，进入等待");
+    int idle_ticks = 0;
     while (1)
     {
         pthread_mutex_lock(&g_lock);
-        while (!g_cmd_scan && !g_cmd_status && !g_cmd_connect && !g_cmd_disconnect)
-            pthread_cond_wait(&g_cv, &g_lock);
+        if (!g_cmd_scan && !g_cmd_status && !g_cmd_connect && !g_cmd_disconnect)
+        {
+            /* 最多等 3 秒：等不到命令也要醒来做「定期重探」。
+               否则相机在 BW21 网卡就绪之前打开本页，就会永远停在演示数据。 */
+            struct timespec ts;
+            clock_gettime(CLOCK_REALTIME, &ts);
+            ts.tv_sec += 3;
+            pthread_cond_timedwait(&g_cv, &g_lock, &ts);
+        }
         int sc = g_cmd_scan, stt = g_cmd_status, cn = g_cmd_connect, dc = g_cmd_disconnect;
         char ssid[WIFI_SSID_LEN], pass[WIFI_PASS_LEN];
         str_copy(ssid, sizeof(ssid), g_new_ssid);
         str_copy(pass, sizeof(pass), g_new_pass);
         g_cmd_scan = g_cmd_status = g_cmd_connect = g_cmd_disconnect = 0;
+        int need_reprobe = (g_st.backend == WIFI_BACKEND_DEMO || g_st.backend == WIFI_BACKEND_NONE) ? 1 : 0;
         g_st.busy = 1;
         pthread_mutex_unlock(&g_lock);
 
-        ui_trace("wifiWorker: 收到命令 scan=%d status=%d connect=%d disc=%d", sc, stt, cn, dc);
-        if (cn)
-            do_connect(ssid, pass);
-        if (dc)
+        if (need_reprobe)
         {
-            g_st.conn_state = WIFI_ST_IDLE;
-            SET_STATUS("已断开");
+            probe_backend();
+            if (g_st.backend == WIFI_BACKEND_BW21)
+            {
+                ui_trace("wifiWorker: 重探成功，后端=BW21");
+                do_status();
+                do_scan();
+            }
         }
-        if (sc)
-            do_scan();
-        if (stt)
-            do_status();
-        ui_trace("wifiWorker: 命令处理完成");
+        else if (!sc && !stt && !cn && !dc)
+        {
+            if (++idle_ticks >= 2)
+            {
+                idle_ticks = 0;
+                do_status();
+            }
+        }
+
+        /* 探到 BW21 后端后，用已保存的凭据自动连一次
+           （开机即可上网，不需要先点开 WiFi 页面） */
+        if (g_st.backend == WIFI_BACKEND_BW21 && !g_auto_connect_done)
+        {
+            char a_ssid[WIFI_SSID_LEN], a_pass[WIFI_PASS_LEN];
+            g_auto_connect_done = 1;
+            if (wifi_load_credentials(a_ssid, sizeof(a_ssid), a_pass, sizeof(a_pass)) == 0 && a_ssid[0])
+            {
+                ui_trace("autoconnect: 用已保存凭据连接 %s", a_ssid);
+                do_connect(a_ssid, a_pass);
+                do_status();
+            }
+            else
+            {
+                ui_trace("autoconnect: 没有已保存的凭据，跳过");
+            }
+        }
+
+        if (sc || stt || cn || dc)
+        {
+            ui_trace("wifiWorker: 收到命令 scan=%d status=%d connect=%d disc=%d", sc, stt, cn, dc);
+            if (cn)
+                do_connect(ssid, pass);
+            if (dc)
+            {
+                g_st.conn_state = WIFI_ST_IDLE;
+                SET_STATUS("已断开");
+            }
+            if (sc)
+                do_scan();
+            if (stt)
+                do_status();
+            ui_trace("wifiWorker: 命令处理完成");
+        }
 
         pthread_mutex_lock(&g_lock);
         g_st.busy = 0;
