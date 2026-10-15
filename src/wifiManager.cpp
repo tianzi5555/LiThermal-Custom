@@ -64,9 +64,9 @@ static void str_copy(char *dst, size_t n, const char *src)
    开机脚本有时配不上（网卡出现太晚等），应用一直跑着，兜底更可靠。 */
 static void net_fix_local_iface(void)
 {
-    system("for i in $(ls /sys/class/net 2>/dev/null); do "
-           "case \"$i\" in lo|usb0|wlan0|eth0|sit0) continue;; esac; "
-           "case \"$i\" in usb*) ;; *) continue;; esac; "
+        system("for i in $(ls /sys/class/net 2>/dev/null); do "
+           "case \"$i\" in lo|wlan0|eth0|sit0) continue;; esac; "
+           "[ -e /sys/class/net/\"$i\"/device ] && continue; "   /* 有 device 的是真 USB 网卡(4117)，跳过 */
            "if ! ip addr show dev \"$i\" 2>/dev/null | grep -q '192.168.2.240'; then "
            "  ifconfig \"$i\" 192.168.2.240 netmask 255.255.255.0 up 2>/dev/null; "
            "  route add default gw 192.168.2.250 dev \"$i\" 2>/dev/null; "
