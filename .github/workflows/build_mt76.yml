@@ -1,0 +1,105 @@
+name: Build mt76 (MT7612U) kernel modules for LiThermal camera
+
+# 给 LiThermal 热成像相机（T113-S3 / Tina Linux 5.4.61）编译 MT7612U 的 WiFi 驱动模块。
+#
+# 依据（全部实测自相机）：
+#   * uname -r = 5.4.61，编译器 arm-openwrt-linux-muslgnueabi-gcc 6.4.1
+#   * CONFIG_MODVERSIONS 未开 → 不需要符号 CRC
+#   * CONFIG_MODULE_SIG 未开 → 不需要模块签名
+#   * CONFIG_CFG80211=y（内建）、CONFIG_MAC80211 未开 → mac80211 需要一起编成模块
+#   * CONFIG_RFKILL=y、CRYPTO_CCM/AES/ARC4=y ✓
+# 因此只要内核版本串一致（5.4.61 SMP PREEMPT），编出来的 .ko 就能直接 insmod。
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "main" ]
+    paths:
+      - ".github/workflows/build_mt76.yml"
+      - ".github/kernel/**"
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    steps:
+      - name: 取出本仓库
+        uses: actions/checkout@v4
+
+      - name: 安装依赖
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential bc bison flex libssl-dev libelf-dev \
+            libncurses5-dev rsync cpio kmod python3 wget xz-utils
+
+      - name: 拉取交叉工具链（与相机内核同款 gcc 6.4.1 musl）
+        run: |
+          git clone --depth 1 https://github.com/diylxy/LiThermal_Compiler.git tc
+          ls tc/toolchain-sunxi-musl/toolchain/bin | head -5
+          test -x tc/toolchain-sunxi-musl/toolchain/bin/arm-openwrt-linux-muslgnueabi-gcc.bin \
+            && echo "工具链 OK" || echo "警告：未找到 gcc 实体文件"
+
+      - name: 拉取内核源码（T113 Tina Linux 5.4.61）
+        run: |
+          git clone --depth 1 https://github.com/Noooooob233/tina-d1-linux-5.4.git linux
+          cd linux
+          head -5 Makefile
+          grep -E '^(VERSION|PATCHLEVEL|SUBLEVEL) =' Makefile
+
+      - name: 套用相机内核配置并打开 mt76/mac80211
+        run: |
+          set -e
+          cd linux
+          cp "$GITHUB_WORKSPACE/.github/kernel/t113_kernel.config" .config
+          # 需要的模块（依赖由 olddefconfig 自动补齐，缺什么就补什么模块）
+          ./scripts/config --module MAC80211
+          ./scripts/config --module MT76
+          ./scripts/config --module MT76x2U
+          ./scripts/config --module MT76x0U
+          ./scripts/config --module MT7601U
+          ./scripts/config --module MAC80211_LEDS || true
+          ./scripts/config --module CRC_CCITT || true
+          ./scripts/config --module CRYPTO_MICHAEL_MIC || true
+          ./scripts/config --module AVERAGE || true
+          ./scripts/config --module CRYPTO_GCM || true
+          make ARCH=arm CROSS_COMPILE=arm-openwrt-linux-muslgnueabi- olddefconfig
+          echo "=== 关键项确认 ==="
+          grep -E '^CONFIG_(MAC80211|MT76|MT76x2U|CFG80211|RFKILL)=' .config || true
+          grep -E '^CONFIG_MODVERSIONS|^CONFIG_MODULE_SIG' .config || true
+
+      - name: 编译内核模块
+        run: |
+          set -o pipefail
+          export PATH="$GITHUB_WORKSPACE/tc/toolchain-sunxi-musl/toolchain/bin:$PATH"
+          export ARCH=arm
+          export CROSS_COMPILE=arm-openwrt-linux-muslgnueabi-
+          export STAGING_DIR="$GITHUB_WORKSPACE/tc/target"
+          which ${CROSS_COMPILE}gcc || ls -l tc/toolchain-sunxi-musl/toolchain/bin | head
+          cd linux
+          make -j"$(nproc)" modules 2>&1 | tail -80
+          echo "=== 找出来的 .ko ==="
+          find . -name 'mac80211.ko' -o -name 'mt76*.ko' -o -name 'mt7601u.ko' -o -name 'crc-ccitt.ko' -o -name 'michael_mic.ko' | sort
+
+      - name: 收集产物 + 打印 vermagic
+        run: |
+          set -e
+          mkdir -p out
+          cd linux
+          for f in $(find . -name 'mac80211.ko' -o -name 'mt76*.ko' -o -name 'mt7601u.ko' \
+                          -o -name 'crc-ccitt.ko' -o -name 'michael_mic.ko' -o -name 'cfg80211.ko' \
+                          -o -name 'rfkill.ko' -o -name 'lib80211*.ko'); do
+            cp "$f" "$GITHUB_WORKSPACE/out/"
+          done
+          cd "$GITHUB_WORKSPACE/out"
+          ls -l
+          for k in *.ko; do
+            echo "--- $k"
+            modinfo "$k" 2>/dev/null | grep -E '^(filename|version|vermagic|depends|name):' || true
+          done
+
+      - name: 上传模块
+        uses: actions/upload-artifact@v4
+        with:
+          name: mt76-modules
+          path: out/*.ko
+          if-no-files-found: error
