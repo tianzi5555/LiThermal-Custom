@@ -57,6 +57,10 @@ extern struct netif xnetif[NET_IF_NUM];
 #define GW_POOL_FIRST     240 /* 相机地址池 .240 ~ .247 */
 #define GW_POOL_LAST      247
 
+/* 引导网段：WiFi 还没连上时先给相机一个能用的网段，让它能访问控制 API（扫网络/发密码）。
+   连上 WiFi 后会按真实网段重算（家里网段通常就是 192.168.x.0/24）。 */
+#define GW_FALLBACK_LAN_BASE 0xC0A80200u /* 192.168.2.0（主机序） */
+
 #define CONFIG_USBH_CDC_ECM_HOTPLUG 1
 
 #define ECM_INIT_THREAD_STACK_SIZE    1280U
@@ -90,6 +94,7 @@ static volatile int s_wifi_state = GW_STATE_IDLE; /* 0 idle 1 connecting 2 conne
 static char s_wifi_ip[20] = {0};
 
 static volatile int s_lan_ready = 0;
+static u32_t s_lan_base = 0;
 static volatile u32_t s_pool_first = 0; /* 主机序 */
 static volatile u32_t s_pool_last = 0;  /* 主机序 */
 static u32_t s_ecm_ip_nbo = 0;
@@ -286,26 +291,42 @@ static int cdc_ecm_do_init(void)
 /* ================================================================== LAN 侧配置（相机网段 + DHCP 服务器） */
 static void gw_setup_lan(void)
 {
-	u32_t sta, mask, base;
-	unsigned char *ip;
+	unsigned char *ip = LwIP_GetIP(WLAN_IDX);
+	unsigned char *mk = LwIP_GetMASK(WLAN_IDX);
+	u32_t sta = 0, mask = 0, base;
 	struct ip_addr pool_start, pool_end;
 
-	ip = LwIP_GetIP(WLAN_IDX);
-	if (ip == NULL) {
-		return;
+	if (ip && ip[0] != 0) {
+		sta = ((u32_t)ip[0] << 24) | ((u32_t)ip[1] << 16) | ((u32_t)ip[2] << 8) | (u32_t)ip[3];
+		if (mk) {
+			mask = ((u32_t)mk[0] << 24) | ((u32_t)mk[1] << 16) | ((u32_t)mk[2] << 8) | (u32_t)mk[3];
+		}
+		if (mask == 0) {
+			mask = 0xFFFFFF00u;
+		}
+		base = (sta & mask) & 0xFFFFFF00u;
+		if (s_lan_ready && base == s_lan_base) {
+			return; /* 已经配过同一个网段，别重复初始化 DHCP 服务器 */
+		}
+		GW_LOG("LAN: 用 WiFi 网段");
+	} else {
+		base = GW_FALLBACK_LAN_BASE & 0xFFFFFF00u;
+		mask = 0xFFFFFF00u;
+		if (s_lan_ready) {
+			return;
+		}
+		GW_LOG("LAN: WiFi 未连上，先用引导网段 192.168.2.0/24（让相机能访问控制 API）");
 	}
-	sta = (u32_t)ip[0] << 24 | (u32_t)ip[1] << 16 | (u32_t)ip[2] << 8 | (u32_t)ip[3];
-	if (sta == 0) {
-		GW_LOG("STA 还没有 IP，稍后再配 LAN");
-		return;
+
+	if (s_lan_ready) {
+		dhcps_deinit(); /* 网段变了，重建 DHCP 服务器 */
+		s_lan_ready = 0;
 	}
-	mask = (u32_t)LwIP_GetMASK(WLAN_IDX)[0] << 24 | (u32_t)LwIP_GetMASK(WLAN_IDX)[1] << 16 |
-		   (u32_t)LwIP_GetMASK(WLAN_IDX)[2] << 8 | (u32_t)LwIP_GetMASK(WLAN_IDX)[3];
-	base = (sta & mask) & 0xFFFFFF00u;
 
 	s_ecm_ip_nbo = htonl(base | GW_ECM_HOST_OCTET);
 	s_pool_first = base | GW_POOL_FIRST;
 	s_pool_last = base | GW_POOL_LAST;
+	s_lan_base = base;
 
 	GW_LOG("LAN: ecm=%lu.%lu.%lu.%lu  pool=%lu.%lu.%lu.%lu-%lu",
 		   (base >> 24) & 0xFF, (base >> 16) & 0xFF, (base >> 8) & 0xFF, (u32_t)GW_ECM_HOST_OCTET,
@@ -688,6 +709,11 @@ static void gw_http_task(void *param)
 
 	(void)param;
 	vTaskDelay(pdMS_TO_TICKS(1500));
+
+	/* 先把 LAN 侧配起来（WiFi 没连上就用引导网段），这样相机一插上就能拿到 IP
+	   并访问控制 API，再由相机把 WiFi 密码送过来 */
+	GW_LOG("http task: 配置 LAN 侧");
+	gw_setup_lan();
 
 	srv = lwip_socket(AF_INET, SOCK_STREAM, 0);
 	if (srv < 0) {
