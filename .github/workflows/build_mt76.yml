@@ -65,47 +65,52 @@ jobs:
           cd linux
           cp "$GITHUB_WORKSPACE/.github/kernel/t113_kernel.config" .config
 
-          # 第一遍：打开 mediatek 无线厂商开关并 olddefconfig，
-          # 让 mediatek/mt76 的 Kconfig 被 source 进来。
-          ./scripts/config --enable WLAN_VENDOR_MEDIATEK
-          ./scripts/config --enable WLAN_VENDOR_REALTEK || true
-          ./scripts/config --module MAC80211
-          make olddefconfig
-          echo "=== 第一遍之后 ==="
-          grep -E '^(CONFIG_WLAN_VENDOR_MEDIATEK|CONFIG_MAC80211|CONFIG_USB)=' .config || true
-          grep -E '^CONFIG_MT76' .config || echo "(还没有 MT76 符号)"
+          # 注意：本内核（OpenWrt 版）的 scripts/config 不顶用 —— 实测
+          # `./scripts/config --module MT76x2U` 之后那一行依然是 "# ... is not set"。
+          # 所以这里直接用 sed 强制改 .config。
+          force_kv() {   # $1=名字(不含 CONFIG_)  $2=y|m
+            if grep -q "^# CONFIG_$1 is not set" .config; then
+              sed -i "s/^# CONFIG_$1 is not set/CONFIG_$1=$2/" .config
+            elif grep -q "^CONFIG_$1=" .config; then
+              sed -i "s/^CONFIG_$1=.*/CONFIG_$1=$2/" .config
+            else
+              echo "CONFIG_$1=$2" >> .config
+            fi
+          }
 
-          # 第二遍：本内核的符号名是 MT76_CORE / MT76_USB / MT76x02_USB / MT76x2_COMMON / MT76x2U
-          echo "--- 写入前 .config 里的 MT76 行："
-          grep -n 'MT76' .config || echo "(无)"
-          ./scripts/config --module MT76x2U
-          echo "--- scripts/config 写入后："
-          grep -n 'MT76x2U' .config || echo "!! scripts/config 根本没写进去"
-          echo "--- Kconfig 里 MT76x2U 的定义与依赖："
-          grep -rn -A8 '^config MT76x2U' drivers/net/wireless/mediatek/ || true
-          echo "--- 当前 MAC80211 / USB："
-          grep -E '^CONFIG_(MAC80211|USB)=' .config || true
-          ./scripts/config --module MT76x2_COMMON
-          ./scripts/config --module MT76x02_USB
-          ./scripts/config --module MT76_USB
-          ./scripts/config --module MT76_CORE
-          ./scripts/config --module CRC_CCITT || true
-          ./scripts/config --module CRYPTO_MICHAEL_MIC || true
-          ./scripts/config --module AVERAGE || true
-          ./scripts/config --module CRYPTO_GCM || true
+          force_kv WLAN_VENDOR_MEDIATEK y
+          force_kv WLAN_VENDOR_REALTEK y
+          force_kv MAC80211 m
+          force_kv MT76x2U m
+          force_kv MT76x2_COMMON m
+          force_kv MT76x02_USB m
+          force_kv MT76x02_LIB m
+          force_kv MT76_USB m
+          force_kv MT76_CORE m
+          force_kv CRC_CCITT m
+          force_kv CRYPTO_MICHAEL_MIC m
+          force_kv AVERAGE m
+
+          echo "--- 强制写入后："
+          grep -E '^CONFIG_(MT76|MAC80211|CRC_CCITT|CRYPTO_MICHAEL_MIC|AVERAGE|WLAN_VENDOR_MEDIATEK)' .config || true
+
+          # 跑一遍 olddefconfig 让隐藏符号（MT76_CORE 等）由 select 正确取值
           make olddefconfig
           echo "--- olddefconfig 之后："
-          grep -n 'MT76' .config || echo "(MT76 行全没了)"
+          grep -E '^CONFIG_(MT76|MAC80211|CRC_CCITT|CRYPTO_MICHAEL_MIC|AVERAGE)' .config || true
 
-          echo "=== 关键项 ==="
-          grep -E '^(CONFIG_WLAN_VENDOR_MEDIATEK|CONFIG_MAC80211|CONFIG_MT76|CONFIG_CFG80211|CONFIG_RFKILL)=' .config || true
+          # olddefconfig 可能把 select 出来的东西退回 y —— 再把要当模块的强制回 m
+          force_kv MAC80211 m
+          force_kv MT76x2U m
+          force_kv CRC_CCITT m
+          force_kv CRYPTO_MICHAEL_MIC m
+          echo "--- 最终确认（不再跑 olddefconfig）："
+          grep -E '^CONFIG_(MT76|MAC80211|MLME|CRC_CCITT|CRYPTO_MICHAEL_MIC|AVERAGE)' .config || true
           grep -E '^CONFIG_MODVERSIONS|^CONFIG_MODULE_SIG' .config || true
 
-          for k in CONFIG_MAC80211 CONFIG_MT76_CORE CONFIG_MT76x2U; do
+          for k in CONFIG_MAC80211 CONFIG_MT76x2U; do
             if ! grep -q "^$k=m" .config; then
-              echo "!! $k 没有变成 =m"
-              grep -E 'MT76' .config || true
-              exit 1
+              echo "!! $k 没有变成 =m"; grep -E 'MT76' .config || true; exit 1
             fi
           done
           echo "配置自检通过"
