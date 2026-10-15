@@ -70,7 +70,7 @@ extern struct netif xnetif[NET_IF_NUM];
 #define ECM_HOTPLUG_THREAD_STACK_SIZE 1024U
 #define ECM_HOTPLUG_THREAD_PRIORITY   (tskIDLE_PRIORITY + 6)
 
-#define GW_WIFI_THREAD_STACK 4096U
+#define GW_WIFI_THREAD_STACK 6144U
 #define GW_HTTP_THREAD_STACK 3072U
 #define GW_THREAD_PRIORITY   (tskIDLE_PRIORITY + 4)
 
@@ -493,13 +493,18 @@ static void gw_wifi_connect_now(void)
 			return;
 		}
 	}
-	GW_LOG("wifi connected, waiting IP ...");
-	LwIP_DHCP(WLAN_IDX, DHCP_START);
-	for (i = 0; i < 40; i++) {
+	GW_LOG("wifi connected, waiting IP (先看框架有没有自动分配) ...");
+	ip = LwIP_GetIP(WLAN_IDX);
+	for (i = 0; i < 20 && !(ip && ip[0] != 0); i++) {
 		vTaskDelay(pdMS_TO_TICKS(250));
 		ip = LwIP_GetIP(WLAN_IDX);
-		if (ip && ip[0] != 0) {
-			break;
+	}
+	if (!(ip && ip[0] != 0)) {
+		GW_LOG("框架没给 IP，自己启动 DHCP 客户端");
+		LwIP_DHCP(WLAN_IDX, DHCP_START);
+		for (i = 0; i < 60 && !(ip && ip[0] != 0); i++) {
+			vTaskDelay(pdMS_TO_TICKS(250));
+			ip = LwIP_GetIP(WLAN_IDX);
 		}
 	}
 	ip = LwIP_GetIP(WLAN_IDX);
@@ -511,7 +516,9 @@ static void gw_wifi_connect_now(void)
 	snprintf(s_wifi_ip, sizeof(s_wifi_ip), "%d.%d.%d.%d", ip[0], ip[1], ip[2], ip[3]);
 	s_wifi_state = GW_STATE_CONNECTED;
 	GW_LOG("STA IP = %s", s_wifi_ip);
+	GW_LOG("开始配置 LAN 侧 ...");
 	gw_setup_lan();
+	GW_LOG("LAN 配置完成（STA 已联网）");
 }
 
 static void gw_wifi_task(void *param)
