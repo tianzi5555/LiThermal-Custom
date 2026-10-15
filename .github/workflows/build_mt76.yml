@@ -90,6 +90,12 @@ jobs:
           force_kv CRC_CCITT m
           force_kv CRYPTO_MICHAEL_MIC m
           force_kv AVERAGE m
+          # 相机内核没有导出 __stack_chk_guard（厂商自己的模块也不含该符号），
+          # 而 OpenWrt 工具链默认开 -fstack-protector，必须关掉，否则 insmod 报
+          # "Unknown symbol __stack_chk_guard"。
+          force_kv STACKPROTECTOR n
+          force_kv STACKPROTECTOR_STRONG n
+          force_kv STACKPROTECTOR_PER_TASK n
 
           echo "--- 强制写入后："
           grep -E '^CONFIG_(MT76|MAC80211|CRC_CCITT|CRYPTO_MICHAEL_MIC|AVERAGE|WLAN_VENDOR_MEDIATEK)' .config || true
@@ -120,7 +126,8 @@ jobs:
           set -o pipefail
           export PATH="$TOOLCHAIN_DIR:$PATH"
           cd linux
-          make -j"$(nproc)" modules 2>&1 | tail -60
+          # KCFLAGS 双保险：即使配置里还残留栈保护相关选项，也不让模块引用 __stack_chk_guard
+          make -j"$(nproc)" KCFLAGS="-fno-stack-protector" modules 2>&1 | tail -60
           echo "=== 找到的 .ko ==="
           find . -name 'mac80211.ko' -o -name 'mt76*.ko' -o -name 'crc-ccitt.ko' -o -name 'michael_mic.ko' | sort
 
@@ -137,6 +144,13 @@ jobs:
           cd "$GITHUB_WORKSPACE/out"
           ls -l
           if [ ! -f mt76x2u.ko ]; then echo "!! 没编出 mt76x2u.ko"; exit 1; fi
+          echo "=== 检查有没有引用相机内核不存在的符号 ==="
+          bad=0
+          for k in *.ko; do
+            n=$(strings "$k" | grep -c '__stack_chk_guard' || true)
+            if [ "$n" != "0" ]; then echo "  $k 仍引用 __stack_chk_guard ✗"; bad=1; else echo "  $k 无栈保护符号 ✔"; fi
+          done
+          [ "$bad" = "0" ] || { echo "!! 仍有 __stack_chk_guard 引用"; exit 1; }
           WANT="5.4.61 SMP preempt mod_unload ARMv7 p2v8"
           for k in *.ko; do
             v=$(modinfo -F vermagic "$k" 2>/dev/null | tr -d '\r' | sed 's/[[:space:]]*$//')
