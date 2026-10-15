@@ -66,8 +66,8 @@ extern struct netif xnetif[NET_IF_NUM];
 #define ECM_HOTPLUG_THREAD_STACK_SIZE 1024U
 #define ECM_HOTPLUG_THREAD_PRIORITY   (tskIDLE_PRIORITY + 6)
 
-#define GW_WIFI_THREAD_STACK 2048U
-#define GW_HTTP_THREAD_STACK 2048U
+#define GW_WIFI_THREAD_STACK 4096U
+#define GW_HTTP_THREAD_STACK 3072U
 #define GW_THREAD_PRIORITY   (tskIDLE_PRIORITY + 4)
 
 /* ------------------------------------------------------------------ 全局状态 */
@@ -466,7 +466,9 @@ static void gw_wifi_task(void *param)
 	GW_LOG("wifi task start");
 	vTaskDelay(pdMS_TO_TICKS(500));
 	if (wifi_on(RTW_MODE_STA) < 0) {
-		GW_LOG("wifi_on init fail");
+		GW_LOG("wifi_on returned error (可能已经开过了)");
+	} else {
+		GW_LOG("wifi_on ok");
 	}
 	for (;;) {
 		if (s_want_disconnect) {
@@ -797,10 +799,9 @@ void li_thermal_gw_start(void)
 
 	GW_LOG("LiThermal BW21 gateway starting");
 
-	/* 先把 WiFi 打开，LAN 配置要等 STA 拿到 IP */
-	if (wifi_on(RTW_MODE_STA) < 0) {
-		GW_LOG("wifi_on fail at boot");
-	}
+	/* 注意：不要在这里调 wifi_on()！这里是框架的 app 任务，栈很小，
+	   WiFi 初始化（HALMAC 等）会直接把它撑爆 → Bus Fault。
+	   WiFi 初始化放到下面 gw_wifi_task（4KB 栈）里做。 */
 
 #if CONFIG_USBH_CDC_ECM_HOTPLUG
 	cdc_ecm_detach_sema = xSemaphoreCreateBinary();
@@ -809,16 +810,20 @@ void li_thermal_gw_start(void)
 		GW_LOG("create hotplug task fail");
 	}
 #endif
+	GW_LOG("create link task");
 	if (xTaskCreate(gw_link_thread, "li_gw_link", ECM_LINK_THREAD_STACK_SIZE,
 					NULL, ECM_LINK_THREAD_PRIORITY, &t) != pdPASS) {
 		GW_LOG("create link task fail");
 	}
+	GW_LOG("create wifi task");
 	if (xTaskCreate(gw_wifi_task, "li_gw_wifi", GW_WIFI_THREAD_STACK,
 					NULL, GW_THREAD_PRIORITY, &t) != pdPASS) {
 		GW_LOG("create wifi task fail");
 	}
+	GW_LOG("create http task");
 	if (xTaskCreate(gw_http_task, "li_gw_http", GW_HTTP_THREAD_STACK,
 					NULL, GW_THREAD_PRIORITY, &t) != pdPASS) {
 		GW_LOG("create http task fail");
 	}
+	GW_LOG("all tasks started");
 }
