@@ -76,6 +76,13 @@ bool system_brightness_option_focused();
 void menu_hidden_gallery_show();
 void menu_system_hide();
 
+// WiFi 网络设置页（主菜单第 4 项）
+void menu_wifi_show();
+void menu_wifi_hide();
+void menu_wifi_loop(bool go_back);
+bool menu_wifi_is_open();
+bool menu_wifi_password_open();
+
 /// @brief 相册事件检查
 /// @param has_hal_go_back_event 如果为true，代表返回（菜单）按键按下
 void menu_gallery_loop(bool has_hal_go_back_event);

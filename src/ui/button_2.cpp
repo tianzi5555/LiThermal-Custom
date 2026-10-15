@@ -1,7 +1,7 @@
 #include <my_main.h>
 
 // 处理中键按下事件
-#define MENU_BUTTON_2_BOX_WIDHT 230
+#define MENU_BUTTON_2_BOX_WIDHT 300
 #define MENU_BUTTON_2_BOX_HEIGHT 136
 #define MENU_BUTTON_2_BOX_Y_SHOW 30
 #define MENU_BUTTON_2_BUTTON_WIDTH_DEFAULT 60
@@ -48,7 +48,7 @@ void menu_button_2_construct(lv_obj_t *parent)
     lv_obj_t *ui_Button2 = lv_btn_create(parent);
     lv_obj_set_width(ui_Button2, MENU_BUTTON_2_BUTTON_WIDTH_DEFAULT);
     lv_obj_set_height(ui_Button2, MENU_BUTTON_2_BUTTON_HEIGHT_DEFAULT);
-    lv_obj_set_x(ui_Button2, -69);
+    lv_obj_set_x(ui_Button2, -102);
     lv_obj_set_y(ui_Button2, 2);
     lv_obj_set_align(ui_Button2, LV_ALIGN_TOP_MID);
     lv_obj_add_flag(ui_Button2, LV_OBJ_FLAG_SCROLL_ON_FOCUS); /// Flags
@@ -77,7 +77,7 @@ void menu_button_2_construct(lv_obj_t *parent)
     lv_obj_t *ui_Button3 = lv_btn_create(parent);
     lv_obj_set_width(ui_Button3, MENU_BUTTON_2_BUTTON_WIDTH_DEFAULT);
     lv_obj_set_height(ui_Button3, MENU_BUTTON_2_BUTTON_HEIGHT_DEFAULT);
-    lv_obj_set_x(ui_Button3, -1);
+    lv_obj_set_x(ui_Button3, -34);
     lv_obj_set_y(ui_Button3, 3);
     lv_obj_set_align(ui_Button3, LV_ALIGN_TOP_MID);
     lv_obj_add_flag(ui_Button3, LV_OBJ_FLAG_SCROLL_ON_FOCUS); /// Flags
@@ -106,7 +106,7 @@ void menu_button_2_construct(lv_obj_t *parent)
     lv_obj_t *ui_Button4 = lv_btn_create(parent);
     lv_obj_set_width(ui_Button4, MENU_BUTTON_2_BUTTON_WIDTH_DEFAULT);
     lv_obj_set_height(ui_Button4, MENU_BUTTON_2_BUTTON_HEIGHT_DEFAULT);
-    lv_obj_set_x(ui_Button4, 67);
+    lv_obj_set_x(ui_Button4, 34);
     lv_obj_set_y(ui_Button4, 3);
     lv_obj_set_align(ui_Button4, LV_ALIGN_TOP_MID);
     lv_obj_add_flag(ui_Button4, LV_OBJ_FLAG_SCROLL_ON_FOCUS); /// Flags
@@ -132,10 +132,41 @@ void menu_button_2_construct(lv_obj_t *parent)
     lv_label_set_text(ui_Label9, "系统\n设置");
     lv_obj_set_style_text_font(ui_Label9, &ui_font_chinese16, LV_PART_MAIN | LV_STATE_DEFAULT);
 
+    // 第 4 个入口：WiFi 网络设置（图标位用文字，避免动字体子集）
+    lv_obj_t *ui_Button5 = lv_btn_create(parent);
+    lv_obj_set_width(ui_Button5, MENU_BUTTON_2_BUTTON_WIDTH_DEFAULT);
+    lv_obj_set_height(ui_Button5, MENU_BUTTON_2_BUTTON_HEIGHT_DEFAULT);
+    lv_obj_set_x(ui_Button5, 102);
+    lv_obj_set_y(ui_Button5, 3);
+    lv_obj_set_align(ui_Button5, LV_ALIGN_TOP_MID);
+    lv_obj_add_flag(ui_Button5, LV_OBJ_FLAG_SCROLL_ON_FOCUS); /// Flags
+    lv_obj_clear_flag(ui_Button5, LV_OBJ_FLAG_SCROLLABLE);    /// Flags
+    lv_obj_set_style_bg_color(ui_Button5, lv_color_hex(0x282B30), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_opa(ui_Button5, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_color(ui_Button5, lv_color_hex(0x1F7A4D), LV_PART_MAIN | LV_STATE_FOCUSED);
+    lv_obj_set_style_bg_opa(ui_Button5, 255, LV_PART_MAIN | LV_STATE_FOCUSED);
+
+    lv_obj_t *ui_Label10 = lv_label_create(ui_Button5);
+    lv_obj_set_width(ui_Label10, LV_SIZE_CONTENT);  /// 1
+    lv_obj_set_height(ui_Label10, LV_SIZE_CONTENT); /// 1
+    lv_obj_set_align(ui_Label10, LV_ALIGN_TOP_MID);
+    lv_label_set_text(ui_Label10, "WiFi");
+    lv_obj_set_style_text_font(ui_Label10, &ui_font_chinese16, LV_PART_MAIN | LV_STATE_DEFAULT);
+
+    lv_obj_t *ui_Label11 = lv_label_create(ui_Button5);
+    lv_obj_set_width(ui_Label11, LV_SIZE_CONTENT);  /// 1
+    lv_obj_set_height(ui_Label11, LV_SIZE_CONTENT); /// 1
+    lv_obj_set_x(ui_Label11, 0);
+    lv_obj_set_y(ui_Label11, 40);
+    lv_obj_set_align(ui_Label11, LV_ALIGN_TOP_MID);
+    lv_label_set_text(ui_Label11, "设置");
+    lv_obj_set_style_text_font(ui_Label11, &ui_font_chinese16, LV_PART_MAIN | LV_STATE_DEFAULT);
+
     // events
     lv_obj_add_event_cb(ui_Button2, event_button_clicked_cb, LV_EVENT_ALL, reinterpret_cast<void *>(0));
     lv_obj_add_event_cb(ui_Button3, event_button_clicked_cb, LV_EVENT_ALL, reinterpret_cast<void *>(1));
     lv_obj_add_event_cb(ui_Button4, event_button_clicked_cb, LV_EVENT_ALL, reinterpret_cast<void *>(2));
+    lv_obj_add_event_cb(ui_Button5, event_button_clicked_cb, LV_EVENT_ALL, reinterpret_cast<void *>(3));
 }
 
 static void card_menuPage_create()
@@ -201,6 +232,10 @@ void refresh_menu_key()
                 UNLOCKLV();
                 current_mode = MODE_MAINPAGE;
                 break;
+            case MODE_WIFI_SETTINGS:
+                // 交给 WiFi 页面自己处理：密码页 → 回列表；列表页 → 关闭
+                menu_wifi_loop(true);
+                break;
             default:
                 break;
             }
@@ -246,6 +281,12 @@ void refresh_menu_key()
                     current_mode = MODE_SYSTEM_SETTINGS;
                     LOCKLV();
                     menu_system_show();
+                    UNLOCKLV();
+                    break;
+                case 3:
+                    current_mode = MODE_WIFI_SETTINGS;
+                    LOCKLV();
+                    menu_wifi_show();
                     UNLOCKLV();
                     break;
                 default:
