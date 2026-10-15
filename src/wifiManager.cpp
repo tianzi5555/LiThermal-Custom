@@ -634,14 +634,19 @@ extern "C" int net_feature_enabled(void)
 	return (b[0] == '1') ? 1 : 0;
 }
 
-static void net_conf_set_mode(const char *mode)
+/* 把 usbnet.conf 里的 KEY=... 改成 KEY=val（没有这一行就追加） */
+static void net_conf_set_kv(const char *key, const char *val)
 {
 	char buf[4096];
+	char want[64];
 	size_t n = 0;
+	size_t klen = strlen(key);
 	FILE *f = fopen(USB_CONF_PATH, "r");
 	FILE *o;
 	char *p;
 	int wrote = 0;
+
+	snprintf(want, sizeof(want), "%s=%s", key, val);
 
 	if (f != NULL) {
 		n = fread(buf, 1, sizeof(buf) - 1, f);
@@ -657,8 +662,8 @@ static void net_conf_set_mode(const char *mode)
 	while (p != NULL && *p != 0) {
 		char *nl = strchr(p, '\n');
 		size_t len = (nl != NULL) ? (size_t)(nl - p) : strlen(p);
-		if (len >= 5 && strncmp(p, "MODE=", 5) == 0 && !wrote) {
-			fprintf(o, "MODE=%s\n", mode);
+		if (len >= klen + 1 && strncmp(p, key, klen) == 0 && p[klen] == '=' && !wrote) {
+			fprintf(o, "%s\n", want);
 			wrote = 1;
 		} else if (len > 0) {
 			fwrite(p, 1, len, o);
@@ -667,7 +672,7 @@ static void net_conf_set_mode(const char *mode)
 		p = (nl != NULL) ? (nl + 1) : NULL;
 	}
 	if (!wrote) {
-		fprintf(o, "MODE=%s\n", mode);
+		fprintf(o, "%s\n", want);
 	}
 	fclose(o);
 }
@@ -680,7 +685,17 @@ extern "C" void net_feature_set(int enable)
 		fclose(f);
 	}
 	/* 开 = 出 ECM 网卡；关 = 不出网卡，USB 口回到原生 adb+MTP */
-	net_conf_set_mode(enable ? "ecm" : "off");
+	net_conf_set_kv("MODE", enable ? "ecm" : "off");
+
+	if (enable) {
+		/* 相机作为家里 LAN 的一员（BW21 做代理 ARP + IP 转发）：
+		   IP 用 BW21 网段的静态地址，网关指向 BW21，DNS 直接用路由器 */
+		net_conf_set_kv("USE_DHCP", "0");
+		net_conf_set_kv("IP", "192.168.2.240");
+		net_conf_set_kv("MASK", "255.255.255.0");
+		net_conf_set_kv("GW", "192.168.2.250");
+		net_conf_set_kv("DNS1", "192.168.2.1");
+	}
 
 	/* 控制接口地址（相机界面用它指挥 BW21） */
 	f = fopen(WIFI_CTL_PATH, "w");

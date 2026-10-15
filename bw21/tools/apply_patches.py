@@ -140,6 +140,41 @@ def main(sdk):
     )
     patch_file(i4, [hunk_c], "ip4")
 
+    # ---------- 4. usbh_cdc_ecm.c：读不到 MAC 字符串时退化成固定 MAC ----------
+    # Linux 的 f_ecm 不提供 iMACAddress 指向的字符串描述符（或长度不符合），
+    # 原代码会一直停在 CDC_ECM_STATE_GET_MAC_STR 重试：
+    #   [ECMH] Get MAC fail error[3]  （无限刷屏，ECM 永远起不来，还会疯狂 detach 打乱 USB）
+    # 退化成固定 MAC 后 mac_valid=1，状态机继续往下走，链路才建得起来。
+    # 对端 MAC 是靠 ARP 学到的，本端 MAC 只要自洽即可。
+    ecm = os.path.join(sdk, r"component/usb/usb_stack/v1.0.0/host/cdc_ecm/usbh_cdc_ecm.c")
+    hunk_d = (
+        "\t} else {\n"
+        "\t\tstatus = usbh_cdc_ecm_process_get_string(host, cdc->dongle_ctrl_buf, USBH_CDC_ECM_MAC_STRING_LEN, cdc->iMACAddressStringId);\n"
+        "\t\tcdc->mac_src_type = CDC_ECM_MAC_DONGLE_SUPPLY;\n"
+        "\t}\n",
+        "\t} else {\n"
+        "\t\tstatus = usbh_cdc_ecm_process_get_string(host, cdc->dongle_ctrl_buf, USBH_CDC_ECM_MAC_STRING_LEN, cdc->iMACAddressStringId);\n"
+        "\t\tcdc->mac_src_type = CDC_ECM_MAC_DONGLE_SUPPLY;\n"
+        f"#ifdef {MARK}\n"
+        "\t\t/* LiThermal: Linux f_ecm 不带 MAC 字符串描述符，读它会失败；\n"
+        "\t\t   原代码会一直重试导致 ECM 永远起不来。这里退化成固定 MAC 继续往下走。 */\n"
+        "\t\tif (status != HAL_OK) {\n"
+        "\t\t\tcdc->mac[0] = 0x02;\n"
+        "\t\t\tcdc->mac[1] = 0x1f;\n"
+        "\t\t\tcdc->mac[2] = 0x3a;\n"
+        "\t\t\tcdc->mac[3] = 0x00;\n"
+        "\t\t\tcdc->mac[4] = 0x00;\n"
+        "\t\t\tcdc->mac[5] = 0x07;\n"
+        "\t\t\tcdc->mac_src_type = CDC_ECM_MAC_RANDOM_SET;\n"
+        "\t\t\tcdc->mac_valid = 1;\n"
+        "\t\t\tRTK_LOGS(TAG, RTK_LOG_INFO, \"LiGW: no MAC string descriptor, use fixed mac\\n\");\n"
+        "\t\t\tstatus = HAL_OK;\n"
+        "\t\t}\n"
+        "#endif\n"
+        "\t}\n",
+    )
+    patch_file(ecm, [hunk_d], "cdc_ecm")
+
     print("补丁完成")
     return 0
 
