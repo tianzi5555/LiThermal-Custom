@@ -151,8 +151,11 @@ int li_gw_proxy_arp(struct netif *netif, const ip4_addr_t *target)
 		return 0;
 	}
 	if (netif == &xnetif[ETHERNET_IDX]) {
-		/* LAN 侧（相机）：相机把整个 /24 当直连，任何单播我们都代答，让包先到我们这里 */
-		return 1;
+		/* LAN 侧（相机）：相机把整个 /24 当直连，任何单播都要替它转发，
+		   但**必须排除相机地址池** —— 那是相机自己的地址。
+		   替它应答会让相机的地址冲突检测（ACD）以为地址被占用而弃用该 IP，
+		   结果相机网卡上只剩 IPv6，主机侧永远连不上。 */
+		return !in_camera_pool(t);
 	}
 	if (netif == &xnetif[WLAN_IDX]) {
 		/* WAN 侧（WiFi）：只替相机地址池代答，别乱答别人的地址 */
