@@ -166,10 +166,7 @@ jobs:
         with:
           name: bw21-flash-tool
           path: |
-            sdk/tools/image_tool/**/uartfwburn.exe
-            sdk/tools/image_tool/**/uartfwburn.linux
-            sdk/tools/image_tool/**/Readme.md
-            sdk/tools/image_tool/**/*.md
+            sdk/tools/image_tool/**
           if-no-files-found: warn
 
       - name: 上传源码包（给本地分析用）
