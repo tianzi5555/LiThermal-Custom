@@ -74,6 +74,8 @@ static int login_idx = 0; // 当前选中的键
 static int login_err_cnt = 0;
 static volatile int login_result = -1; // -1 继续等 / LIOS_ENTER_CAMERA / LIOS_ENTER_LIOS
 
+static const char *LOGIN_HELP = "输完密码，滚轮移到「确定」按下";
+
 static void login_refresh_field(void)
 {
     if (login_ta == NULL || !lv_obj_is_valid(login_ta))
@@ -83,9 +85,9 @@ static void login_refresh_field(void)
     if (login_msg != NULL && lv_obj_is_valid(login_msg))
     {
         if (login_err_cnt >= LOGIN_NEED_CONFIRM)
-            lv_label_set_text(login_msg, "按菜单键可直接进相机");
-        else if (n >= LOGIN_PW_MAX)
-            lv_label_set_text(login_msg, "已满 16 位，按确定");
+            lv_label_set_text(login_msg, "密码错误。菜单键可直接进相机");
+        else if (n > 0)
+            lv_label_set_text(login_msg, LOGIN_HELP);
         else
             lv_label_set_text(login_msg, "请输入密码（菜单键退出）");
     }
