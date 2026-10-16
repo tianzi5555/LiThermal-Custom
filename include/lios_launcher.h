@@ -32,6 +32,11 @@ extern "C"
     /// @brief 启动看门狗：UI 心跳停 3 秒 → 写日志 + _exit(99)，让脚本重启相机
     void lios_watchdog_start(void);
 
+    /// @brief UI 线程每转一圈调一次（HAL::lv_loop 里），给看门狗喂心跳。
+    /// 不用 LVGL 定时器做心跳是故意的：实测在 UI 线程起来之前建的 LVGL 定时器不会触发，
+    /// 纯计数器没有任何这种坑。
+    void lios_ui_beat(void);
+
     /// @brief 当前是不是 LiOS 桌面在显示（= 相机线程应该待机）
     bool lios_mode_active(void);
 

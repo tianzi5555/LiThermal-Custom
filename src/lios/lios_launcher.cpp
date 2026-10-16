@@ -346,11 +346,18 @@ static void tile_activate(int idx)
 
 static lv_timer_t *g_hb_timer = NULL;
 static volatile int g_hb_seq = 0;      // 心跳次数（由定时器回调加）
+static volatile uint32_t g_ui_beat = 0; // UI 线程每转一圈 +1（HAL::lv_loop 里喂）
 static volatile int g_probe_cnt = 0;   // 探测定时器（500ms）触发次数
 static volatile int g_autotest_step = 0; // 自动测试走到第几步
 static volatile int g_tile_open_cnt = 0; // 「打开方块」成功执行了几次
 static volatile int g_app_exit_cnt = 0;  // 「退出应用」成功执行了几次
 static volatile bool g_autotest_wanted = false; // 自动测试是否被请求（/tmp/lios_autotest 存在）
+
+// HAL::lv_loop 每圈调一次（myHAL.cpp）——看门狗就看这个计数器
+void lios_ui_beat(void)
+{
+    g_ui_beat++;
+}
 
 static void autotest_probe_cb(lv_timer_t *t)
 {
@@ -425,30 +432,24 @@ static void autotest_arm_timers(void)
 
 // ---------------------------------------------------------------- 看门狗
 //
-// 这是个安全网：如果哪一步又把 UI 线程卡死了（屏幕不刷新、按键不响应），
-// 看门狗会写一条日志进 /tmp/lios.log，然后 _exit(99) 让 thermalcamera.sh
-// 的降级循环把相机重新拉起来（宁可重启，也不要留一块死屏 + 电源键无反应）。
+// 安全网：如果哪一步又把 UI 线程卡死了（屏幕不刷新、按键不响应），看门狗会写一条
+// 日志进 /tmp/lios.log，然后 _exit(99) 让 thermalcamera.sh 的降级循环把相机重新拉起来
+//（宁可重启，也不要留一块死屏 + 电源键无反应）。
 //
-// 心跳每 200ms 由 LVGL 定时器加一；看门狗每 500ms 看一次，
-// 连续 3 秒心跳没动就判定卡死。
+// 心跳来源是 HAL::lv_loop 每圈调的 lios_ui_beat()（纯计数器）；
+// 故意不用 LVGL 定时器：实测 UI 线程起来之前建的 LVGL 定时器根本不会触发。
 
-static volatile uint32_t g_beat = 0;
 static volatile bool g_wd_stop = false;
 static pthread_t g_wd_thread;
 
-static void heartbeat_cb(lv_timer_t *t)
-{
-    (void)t;
-    g_beat++;
-}
-
 static void *lios_watchdog_thread(void *)
 {
-    uint32_t last = g_beat;
+    uint32_t last = g_ui_beat;
     int stuck = 0;
     int tick = 0;
-    // 先等 UI 线程跑起来，再把自动测试的定时器建出来（在 UI 线程起来之前建的定时器不会触发）
-    usleep(1500 * 1000);
+    // 等 UI 线程跑起来，再把自动测试的定时器建出来
+    // （同样是因为「UI 线程起来之前建的 LVGL 定时器不会触发」这个坑）
+    usleep(2000 * 1000);
     lios_log("看门狗: 准备 arm 自动测试（wanted=%d）", g_autotest_wanted ? 1 : 0);
     autotest_arm_timers();
     while (!g_wd_stop)
@@ -456,10 +457,10 @@ static void *lios_watchdog_thread(void *)
         usleep(500 * 1000);
         if (g_wd_stop)
             break;
-        if (++tick % 2 == 0) // 每 1 秒记一次：心跳值 + 自动测试进度（看门狗是普通线程，写日志正常）
-            lios_log("看门狗: beat=%u probe=%d step=%d tile_open=%d app_exit=%d",
-                     (unsigned)g_beat, g_probe_cnt, g_autotest_step, g_tile_open_cnt, g_app_exit_cnt);
-        if (g_beat == last)
+        if (++tick % 4 == 0) // 每 2 秒记一次：心跳值 + 自动测试进度
+            lios_log("看门狗: ui_beat=%u probe=%d step=%d tile_open=%d app_exit=%d",
+                     (unsigned)g_ui_beat, g_probe_cnt, g_autotest_step, g_tile_open_cnt, g_app_exit_cnt);
+        if (g_ui_beat == last)
         {
             stuck++;
             if (stuck >= 6) // 3 秒
@@ -473,7 +474,7 @@ static void *lios_watchdog_thread(void *)
         else
         {
             stuck = 0;
-            last = g_beat;
+            last = g_ui_beat;
         }
     }
     return NULL;
@@ -481,15 +482,11 @@ static void *lios_watchdog_thread(void *)
 
 void lios_watchdog_start(void)
 {
-    g_beat = 0;
     g_wd_stop = false;
-    LOCKLV();
-    lv_timer_create(heartbeat_cb, 200, NULL);
-    UNLOCKLV();
     if (pthread_create(&g_wd_thread, NULL, lios_watchdog_thread, NULL) == 0)
     {
         pthread_detach(g_wd_thread);
-        lios_log("看门狗已启动（心跳 200ms，卡死 3 秒即重启相机）");
+        lios_log("看门狗已启动（心跳来自 lv_loop，卡死 3 秒即重启相机）");
     }
     else
     {

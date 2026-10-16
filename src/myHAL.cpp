@@ -326,6 +326,8 @@ void HAL::lv_loop()
     {
         /* --- perf probe: lv_task_handler 全程（含抢 lv_mutex，能看出被别的线程顶住多久） --- */
         uint32_t perf_lv_t0 = perf_probe_now_us();
+        // LiOS 看门狗心跳：UI 线程每转一圈 +1（不依赖 LVGL 定时器，纯计数器最可靠）
+        lios_ui_beat();
         LOCKLV();
         lv_task_handler();
         UNLOCKLV();
