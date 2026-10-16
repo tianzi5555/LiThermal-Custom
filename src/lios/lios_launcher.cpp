@@ -394,8 +394,9 @@ void lios_autotest_start(void)
     lios_log("=== autotest 已启用（/tmp/lios_autotest 存在）===");
     LOCKLV();
     g_hb_timer = lv_timer_create(autotest_hb_cb, 500, NULL);
-    lv_timer_create(autotest_step_cb, 3000, NULL);
+    lv_timer_t *st = lv_timer_create(autotest_step_cb, 3000, NULL);
     UNLOCKLV();
+    lios_log("autotest: 定时器 hb=%p step=%p（NULL 表示创建失败）", (void *)g_hb_timer, (void *)st);
 }
 
 // ---------------------------------------------------------------- 看门狗
@@ -421,11 +422,14 @@ static void *lios_watchdog_thread(void *)
 {
     uint32_t last = g_beat;
     int stuck = 0;
+    int tick = 0;
     while (!g_wd_stop)
     {
         usleep(500 * 1000);
         if (g_wd_stop)
             break;
+        if (++tick % 4 == 0) // 每 2 秒记一次实际心跳值，用来判断 UI 线程到底在不在跑
+            lios_log("看门狗: beat=%u（%s）", (unsigned)g_beat, (g_beat == last) ? "没动" : "在涨");
         if (g_beat == last)
         {
             stuck++;
