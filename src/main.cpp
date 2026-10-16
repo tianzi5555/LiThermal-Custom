@@ -1,7 +1,8 @@
 #include "my_main.h"
 #include "uiTrace.h"
 #include "statusBar.h"
-#include "lios_user.h" // LiOS 第一期：开机密码 + 两种顶层模式（--login）
+#include "lios_user.h"     // LiOS 第一期：开机密码 + 两种顶层模式（--login）
+#include "lios_launcher.h" // LiOS 第二期：真桌面 + 双向模式切换
 #include "perfProbe.h" // 临时性能探针（诊断用，可删）
 #include <signal.h>
 #include <fcntl.h>
@@ -51,7 +52,8 @@ pthread_t thread_app;
 void *thread_app_func(void *)
 {
     static uint32_t last_color_palette = -1;
-    while (cameraUtils.connected == false)
+    // LiOS 第二期：切到桌面时相机线程先待机（不读图不刷界面），回相机后自动恢复
+    while (cameraUtils.connected == false || lios_mode_active())
         usleep(100000);
     sleep(1);
     // 关闭 4117 自带叠加，避免数码变焦把 OSD 放大/裁花
@@ -77,6 +79,12 @@ void *thread_app_func(void *)
         {
             last_color_palette = globalSettings.colorPalette;
             cameraUtils.setColorPalette(globalSettings.colorPalette);
+        }
+        // LiOS 第二期：桌面显示期间暂停相机 UI 刷新（回相机后循环自己继续）
+        if (lios_mode_active())
+        {
+            usleep(100000);
+            continue;
         }
         /* 注意：getTemperature() 已经不在这里同步调用了（搬到 thread_temp_poll_func）。
            原来每轮同步等一次 HTTP，实测 getTemp_avg≈97ms / max≈262ms，把这条本该 25Hz 的
@@ -113,10 +121,16 @@ void *thread_ui_func(void *)
 
 void *thread_center_temp_func(void *)
 {
-    while (cameraUtils.connected == false)
+    // LiOS 第二期：桌面显示期间待机，回相机后继续（原逻辑一律不改）
+    while (cameraUtils.connected == false || lios_mode_active())
         usleep(100000);
     while (1)
     {
+        if (lios_mode_active())
+        {
+            usleep(100000);
+            continue;
+        }
         /* --- perf probe: 中心温度线程每轮周期（含固定 sleep，用来确认周期真的对） --- */
         uint32_t perf_center_t0 = perf_probe_now_us();
 
@@ -159,10 +173,16 @@ void *thread_center_temp_func(void *)
 pthread_t thread_temp_poll;
 void *thread_temp_poll_func(void *)
 {
-    while (cameraUtils.connected == false)
+    // LiOS 第二期：桌面显示期间待机，回相机后继续（原逻辑一律不改）
+    while (cameraUtils.connected == false || lios_mode_active())
         usleep(100000);
     while (1)
     {
+        if (lios_mode_active())
+        {
+            usleep(100000);
+            continue;
+        }
         uint32_t t0 = perf_probe_now_us();
         if (current_mode == MODE_MAINPAGE || current_mode == MODE_CAMERA_SETTINGS)
         {
@@ -201,32 +221,25 @@ int main(int argc, char **argv)
         current_mode = MODE_LOGIN; // 让滚轮/按键交给密码界面（见 myHAL.cpp: encoder_read）
         lios_mode_t m = lios_login_show_and_run();
         enter_lios_mode = (m == LIOS_ENTER_LIOS);
-        current_mode = enter_lios_mode ? MODE_LIOS : MODE_MAINPAGE;
         printf("[lios] 进入%s\n", enter_lios_mode ? " LiOS 模式" : "相机");
     }
 
-    printf("Loop begin\n");
-    waitboot_scr_load(lv_scr_act());
-    widget_graph_create();
-    ui_crosshairs_create();
-    ui_center_display_create();
-    ui_statusbar_create(); // 顶部半透明状态条（CPU/内存）
-    pthread_create(&thread_ui, NULL, thread_ui_func, NULL);
-    cameraUtils.initHTTPClient();
-
+    // ---- 相机启动（幂等）----
+    // 由 enter_camera() 统一负责：waitboot 连接动画、各 UI 部件、相机线程。
+    // 第二期起相机/C 桌面可以双向往返，所以这里不再直接建线程。
     if (enter_lios_mode)
     {
-        // LiOS 模式：UI 线程照常跑，但先不连相机、不启相机相关线程，
-        // 只显示占位桌面；按菜单键退出桌面后才继续原来的相机初始化流程。
-        // 注意：这里还没进相机，所以当前的“回相机”只是回相机界面，
-        //       「用 LiOS 密码重新登录 LiOS」放在第二期做（本期不锁死用户）。
-        lios_launcher_screen();
-        printf("[lios] 退出 LiOS 桌面，继续相机初始化\n");
+        // LiOS 模式：先让 launcher 线程去建桌面；桌面退出后它自己会调 enter_camera()
+        current_mode = MODE_LIOS;
+        lios_enter();
+        printf("[lios] 已切到 LiOS 桌面（退出桌面后自动启动相机）\n");
+    }
+    else
+    {
+        current_mode = MODE_MAINPAGE;
+        enter_camera();
     }
 
-    pthread_create(&thread_app, NULL, thread_app_func, NULL);
-    pthread_create(&thread_temp_poll, NULL, thread_temp_poll_func, NULL); // 温度轮询独立线程
-    pthread_create(&thread_center_temp, NULL, thread_center_temp_func, NULL);
     void *result;
     pthread_join(thread_ui, &result);
     return 0;

@@ -27,3 +27,9 @@ include_directories(rlottie_inc)
 add_subdirectory(libs/lvgl)
 add_subdirectory(libs/lv_drivers)
 target_link_libraries(${PROJECT_NAME} lvgl lv_drivers uapi avcodec avdevice avformat avfilter avutil swscale pthread rlottie m)
+
+# LiOS 插件（/mnt/UDISK/apps/*.so）要能解析到主程序里的 LVGL / lios_log 符号，
+# 所以主程序必须把动态符号表导出来（-rdynamic / -Wl,--export-dynamic）。
+# 不加这个，插件 dlopen(RTLD_NOW) 会因为找不到 lv_obj_create 之类直接失败。
+# 用 CMAKE_EXE_LINKER_FLAGS 而不是 target_link_options：兼容老版本 cmake 3.7。
+SET(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -rdynamic")

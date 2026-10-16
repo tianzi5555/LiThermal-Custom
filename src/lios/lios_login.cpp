@@ -21,6 +21,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 // ---------------------------------------------------------------- 启动参数
@@ -57,7 +58,14 @@ bool lios_user_prepare(int argc, char **argv)
 #define LOGIN_BTN_W 84
 #define LOGIN_BTN_H 34
 #define LOGIN_BTN_GAP 4
-#define LOGIN_NEED_CONFIRM 6 // 连错这么多次就提示「菜单键直接进相机」
+#define LOGIN_NEED_CONFIRM 6 // 连错这么多次就额外提示「三步退出」
+
+// 退出登录的手势（第二期加的防误触）：菜单键 → 录像键 → 波轮确认键
+// 中间任何一步按错、或者两步之间超过 LOGIN_EXIT_TIMEOUT_MS，就作废回待机
+#define LOGIN_EXIT_TIMEOUT_MS 4000
+#define LOGIN_EXIT_STEP0 0 // 待机
+#define LOGIN_EXIT_STEP1 1 // 已按菜单键
+#define LOGIN_EXIT_STEP2 2 // 已按菜单键 + 录像键
 
 // 数字键（顺序 = LVGL 组的遍历顺序，也是滚轮顺序；正好 12 个键占满 4×3）
 static const char *LOGIN_KEYS[12] = {
@@ -69,12 +77,25 @@ static const char *LOGIN_KEYS[12] = {
 static lv_obj_t *scr_login = NULL;  // 登录界面根容器（全屏，放在 lv_layer_sys）
 static lv_obj_t *login_ta = NULL;   // 密码输入框
 static lv_obj_t *login_msg = NULL;  // 底部提示行（错误/重输提示）
+static lv_obj_t *login_gest = NULL; // 常驻的手势提示小字
 static lv_obj_t *login_keys[12] = {NULL};
 static int login_idx = 0; // 当前选中的键
 static int login_err_cnt = 0;
-static volatile int login_result = -1; // -1 继续等 / LIOS_ENTER_CAMERA / LIOS_ENTER_LIOS
+static int login_exit_step = LOGIN_EXIT_STEP0;
+static uint32_t login_exit_t0 = 0;                  // 上一步按下的时刻
+static volatile int login_result = -1;              // -1 继续等 / LIOS_ENTER_CAMERA / LIOS_ENTER_LIOS
 
 static const char *LOGIN_HELP = "输完密码，滚轮移到「确定」按下";
+// 注意：这里只用 ASCII 的 > 和普通空格，避免 · / → 这类符号缺字形显示成方框
+static const char *LOGIN_GESTURE = "退出登录：菜单 > 录像 > 确认";
+static const char *LOGIN_TAIL = "（直接进相机）";
+
+static uint32_t login_now_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint32_t)(ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
+}
 
 static void login_refresh_field(void)
 {
@@ -84,13 +105,28 @@ static void login_refresh_field(void)
     int n = (t != NULL) ? (int)strlen(t) : 0;
     if (login_msg != NULL && lv_obj_is_valid(login_msg))
     {
-        if (login_err_cnt >= LOGIN_NEED_CONFIRM)
-            lv_label_set_text(login_msg, "密码错误。菜单键可直接进相机");
+        if (login_exit_step == LOGIN_EXIT_STEP1)
+            lv_label_set_text(login_msg, "退出登录 1/3 已按菜单键，请按 录像键");
+        else if (login_exit_step == LOGIN_EXIT_STEP2)
+            lv_label_set_text(login_msg, "退出登录 2/3 已按录像键，请按 确认键");
+        else if (login_err_cnt >= LOGIN_NEED_CONFIRM)
+            lv_label_set_text(login_msg, "密码错误。退出请按 菜单>录像>确认");
         else if (n > 0)
             lv_label_set_text(login_msg, LOGIN_HELP);
         else
-            lv_label_set_text(login_msg, "请输入密码（菜单键退出）");
+            lv_label_set_text(login_msg, "请输入密码");
     }
+}
+
+// 手势作废（超时或按错）→ 回待机并给一行提示
+static void login_exit_reset(const char *why)
+{
+    if (login_exit_step != LOGIN_EXIT_STEP0)
+        lios_log("退出登录手势作废（%s）", why ? why : "");
+    login_exit_step = LOGIN_EXIT_STEP0;
+    login_exit_t0 = 0;
+    if (login_msg != NULL && lv_obj_is_valid(login_msg) && why != NULL)
+        lv_label_set_text(login_msg, why);
 }
 
 // 滚轮换键：自己改焦点 + 自己刷样式（不依赖 LVGL 的 FOCUSED 事件）
@@ -157,7 +193,7 @@ static void login_key_cb(lv_event_t *e)
         if (login_msg != NULL && lv_obj_is_valid(login_msg))
         {
             if (login_err_cnt >= LOGIN_NEED_CONFIRM)
-                lv_label_set_text(login_msg, "密码错误。菜单键可直接进相机");
+                lv_label_set_text(login_msg, "密码错误。退出请按 菜单>录像>确认");
             else
                 lv_label_set_text(login_msg, "密码错误，请重输");
         }
@@ -209,6 +245,9 @@ static void login_cleanup(void)
     scr_login = NULL;
     login_ta = NULL;
     login_msg = NULL;
+    login_gest = NULL;
+    login_exit_step = LOGIN_EXIT_STEP0;
+    login_exit_t0 = 0;
     for (int i = 0; i < 12; i++)
         login_keys[i] = NULL;
     login_idx = 0;
@@ -260,9 +299,18 @@ lios_mode_t lios_login_show_and_run(void)
     lv_obj_set_style_text_font(login_msg, &ui_font_cn16, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_text_color(login_msg, lv_color_hex(0x9AA7B4), LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_pos(login_msg, 8, 218);
-    lv_label_set_text(login_msg, "请输入密码（菜单键退出）");
+    lv_label_set_text(login_msg, "请输入密码");
+
+    // 常驻的手势提示小字（用户得想得起来怎么退出登录）
+    login_gest = lv_label_create(scr_login);
+    lv_obj_set_style_text_font(login_gest, &ui_font_cn12, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_color(login_gest, lv_color_hex(0x5E6A76), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_pos(login_gest, 8, 234);
+    lv_label_set_text_fmt(login_gest, "%s%s", LOGIN_GESTURE, LOGIN_TAIL);
 
     login_idx = 0;
+    login_exit_step = LOGIN_EXIT_STEP0;
+    login_exit_t0 = 0;
     login_apply_nav();
     UNLOCKLV();
 
@@ -273,15 +321,67 @@ lios_mode_t lios_login_show_and_run(void)
     usleep(50000);
     while (login_result < 0)
     {
+        uint32_t now = login_now_ms();
+        bool menu_ev, rec_ev, enter_ev;
+
         LOCKLV();
         lv_timer_handler();
-        if (HAL::key_press_event[1])
-        {
-            // 菜单键 = 退出登录 = 直接进相机（硬要求：绝不锁死用户）
+        menu_ev = HAL::key_press_event[1];
+        if (menu_ev)
             HAL::key_press_event[1] = false;
-            login_result = LIOS_ENTER_CAMERA;
-            lios_log("菜单键退出登录，直接进相机");
+        rec_ev = HAL::key_press_event[2];
+        if (rec_ev)
+            HAL::key_press_event[2] = false;
+        enter_ev = HAL::key_press_event[3];
+        if (enter_ev)
+            HAL::key_press_event[3] = false;
+
+        // 手势超时 → 作废（给一行提示）
+        if (login_exit_step != LOGIN_EXIT_STEP0 && login_exit_t0 != 0 &&
+            (now - login_exit_t0) > LOGIN_EXIT_TIMEOUT_MS)
+        {
+            login_exit_reset("退出超时，已取消（菜单>录像>确认）");
         }
+
+        // 三步退出：菜单键 → 录像键 → 波轮确认键
+        if (menu_ev)
+        {
+            if (login_exit_step == LOGIN_EXIT_STEP0)
+            {
+                login_exit_step = LOGIN_EXIT_STEP1;
+                login_exit_t0 = now;
+            }
+            else
+            {
+                login_exit_reset("按键顺序不对，已取消（菜单>录像>确认）");
+            }
+        }
+        else if (rec_ev)
+        {
+            if (login_exit_step == LOGIN_EXIT_STEP1)
+            {
+                login_exit_step = LOGIN_EXIT_STEP2;
+                login_exit_t0 = now;
+            }
+            else
+            {
+                login_exit_reset("按键顺序不对，已取消（菜单>录像>确认）");
+            }
+        }
+        else if (enter_ev)
+        {
+            if (login_exit_step == LOGIN_EXIT_STEP2)
+            {
+                login_result = LIOS_ENTER_CAMERA;
+                lios_log("三步退出登录完成（菜单→录像→确认）→ 直接进相机");
+            }
+            else if (login_exit_step != LOGIN_EXIT_STEP0)
+            {
+                login_exit_reset("按键顺序不对，已取消（菜单>录像>确认）");
+            }
+        }
+        if (login_exit_step != LOGIN_EXIT_STEP0)
+            login_refresh_field();
         UNLOCKLV();
         usleep(10000);
     }

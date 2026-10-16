@@ -13,6 +13,7 @@
 #include "my_main.h"
 #include "uiKeyboard.h"
 #include "uiTrace.h"
+#include "lios_launcher.h" // LiOS 第二期：从相机切到 LiOS 桌面
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -26,6 +27,8 @@
 #define TERM_CARD_W 314
 #define TERM_CARD_H 236
 #define TERM_CARD_Y 2
+#define TERM_BTN_X 2                                    // 顶部快捷键行起点
+#define TERM_BTN_PITCH 63                               // 60 宽 + 3 间距（4 个键）
 #define TERM_TIMEOUT_MS 8000
 #define TERM_OUT_MAX 3000
 #define TERM_OUTF "/tmp/term.out"
@@ -163,6 +166,18 @@ static void btn_clear_logs_cb(lv_event_t *e)
             "echo \"可用 ${b}KB -> ${a}KB\"");
 }
 
+// LiOS 第二期：切到 LiOS 桌面
+// 注意：这里只关掉终端卡片，真正的模式切换交给 launcher 线程
+//（它会把相机界面盖住；从桌面回相机时相机线程会自己待机/恢复）。
+static void btn_lios_cb(lv_event_t *e)
+{
+    (void)e;
+    ui_trace("terminal: 按「进LiOS」 -> lios_enter()");
+    menu_terminal_hide();
+    current_mode = MODE_LIOS;
+    lios_enter();
+}
+
 // ---------------------------------------------------------------- 页面
 void menu_terminal_show(void)
 {
@@ -182,31 +197,34 @@ void menu_terminal_show(void)
     lv_obj_set_style_text_font(title, &ui_font_cn16, LV_PART_MAIN | LV_STATE_DEFAULT);
 
     lv_obj_t *b1 = lv_btn_create(root);
-    lv_obj_set_size(b1, 78, 20);
-    lv_obj_set_pos(b1, TERM_CARD_W - 244, 1);
+    lv_obj_set_size(b1, 60, 26);
+    lv_obj_set_pos(b1, TERM_BTN_X, 0);
     lv_obj_clear_flag(b1, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_pad_all(b1, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_bg_color(b1, lv_color_hex(0x2B3640), LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_t *l1 = lv_label_create(b1);
-    lv_label_set_text(l1, "USB 状态");
+    lv_label_set_text(l1, "USB状态");
     lv_obj_set_style_text_font(l1, &ui_font_cn16, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_center(l1);
     lv_obj_add_event_cb(b1, btn_usb_status_cb, LV_EVENT_CLICKED, NULL);
 
     lv_obj_t *b2 = lv_btn_create(root);
-    lv_obj_set_size(b2, 78, 20);
-    lv_obj_set_pos(b2, TERM_CARD_W - 164, 1);
+    lv_obj_set_size(b2, 60, 26);
+    lv_obj_set_pos(b2, TERM_BTN_X + TERM_BTN_PITCH, 0);
     lv_obj_clear_flag(b2, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_pad_all(b2, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_bg_color(b2, lv_color_hex(0x1E7F4F), LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_t *l2 = lv_label_create(b2);
-    lv_label_set_text(l2, "恢复 USB");
+    lv_label_set_text(l2, "恢复USB");
     lv_obj_set_style_text_font(l2, &ui_font_cn16, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_center(l2);
     lv_obj_add_event_cb(b2, btn_usb_restore_cb, LV_EVENT_CLICKED, NULL);
 
     lv_obj_t *b3 = lv_btn_create(root);
-    lv_obj_set_size(b3, 78, 20);
-    lv_obj_set_pos(b3, TERM_CARD_W - 84, 1);
+    lv_obj_set_size(b3, 60, 26);
+    lv_obj_set_pos(b3, TERM_BTN_X + TERM_BTN_PITCH * 2, 0);
     lv_obj_clear_flag(b3, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_pad_all(b3, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_bg_color(b3, lv_color_hex(0x8A4B12), LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_t *l3 = lv_label_create(b3);
     lv_label_set_text(l3, "清除日志");
@@ -214,9 +232,22 @@ void menu_terminal_show(void)
     lv_obj_center(l3);
     lv_obj_add_event_cb(b3, btn_clear_logs_cb, LV_EVENT_CLICKED, NULL);
 
+    // LiOS 第二期：相机 → LiOS 桌面的入口（放在这个隐藏终端里，不改任何现有操作习惯）
+    lv_obj_t *b4 = lv_btn_create(root);
+    lv_obj_set_size(b4, 60, 26);
+    lv_obj_set_pos(b4, TERM_BTN_X + TERM_BTN_PITCH * 3, 0);
+    lv_obj_clear_flag(b4, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_pad_all(b4, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_color(b4, lv_color_hex(0x2F5D8A), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_t *l4 = lv_label_create(b4);
+    lv_label_set_text(l4, "进LiOS");
+    lv_obj_set_style_text_font(l4, &ui_font_cn16, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_center(l4);
+    lv_obj_add_event_cb(b4, btn_lios_cb, LV_EVENT_CLICKED, NULL);
+
     out_cont = lv_obj_create(root);
-    lv_obj_set_size(out_cont, TERM_CARD_W - 8, 66);
-    lv_obj_set_pos(out_cont, 0, 26);
+    lv_obj_set_size(out_cont, TERM_CARD_W - 8, 60);
+    lv_obj_set_pos(out_cont, 0, 28);
     lv_obj_set_flex_flow(out_cont, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_style_pad_all(out_cont, 3, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_pad_row(out_cont, 2, LV_PART_MAIN | LV_STATE_DEFAULT);

@@ -1,5 +1,6 @@
 #include "myHAL.h"
 #include "uiTrace.h"
+#include "lios_launcher.h" // LiOS 第二期：桌面的滚轮/按键转发
 #include "perfProbe.h" // 临时性能探针（诊断用，可删）
 #include "lv_drivers/display/sunxifb.h"
 #include <unistd.h>
@@ -102,9 +103,13 @@ static void *thread_refreshEncoder(void *)
 // LVGL编码器读取
 static void encoder_read(lv_indev_drv_t *drv, lv_indev_data_t *data)
 {
+    // LiOS：有应用占屏时滚轮要转发给应用（lios_launcher_poll 里读 last_encoder_direction），
+    // 所以不能同时让 LVGL 拿去走焦点
+    if (lios_launcher_app_active())
+        data->enc_diff = 0;
     // 主界面/相册里滚轮另有用途（数码变焦、亮度和翻页），不交给 LVGL；
     // 其它模式（含 LiOS 的登录界面和桌面）都交给 LVGL 走焦点。
-    if (current_mode != MODE_MAINPAGE && current_mode != MODE_GALLERY)
+    else if (current_mode != MODE_MAINPAGE && current_mode != MODE_GALLERY)
         data->enc_diff = encoder_new_move;
     else
         data->enc_diff = 0;
@@ -174,7 +179,19 @@ void *thread_hal_func(void *)
             PowerManager_powerOff();
         }
 
-        if (current_mode == MODE_MAINPAGE)
+        if (current_mode == MODE_LIOS)
+        {
+            // LiOS 桌面/应用：滚轮和按键转发给 launcher（它再决定给应用还是自己导航）
+            lios_launcher_poll();
+        }
+        else if (current_mode == MODE_LOGIN)
+        {
+            // 开机密码界面由 lios_login.cpp 自己处理；这里只清掉提取出来的事件
+            last_encoder_direction = 0;
+            HAL::key_press_event[2] = false;
+            HAL::key_press_event[3] = false;
+        }
+        else if (current_mode == MODE_MAINPAGE)
         {
             if (last_encoder_direction != 0)
             {
@@ -203,14 +220,6 @@ void *thread_hal_func(void *)
         {
             // WiFi 设置页：刷新扫描结果/状态；返回键由 refresh_menu_key 转发
             menu_terminal_loop(false);
-        }
-        else if (current_mode == MODE_LOGIN || current_mode == MODE_LIOS)
-        {
-            // LiOS：登录界面/桌面的按键由 lios_login.cpp / lios_desktop.cpp 自己处理，
-            // 这里只把提取出的编码器变化量清掉（别让它泄到别的模式）
-            last_encoder_direction = 0;
-            HAL::key_press_event[2] = false;
-            HAL::key_press_event[3] = false;
         }
         else // 清零提取出的编码器变化值
         {
