@@ -358,12 +358,7 @@ void lios_ui_beat(void)
     g_ui_beat++;
 }
 
-// 定时器回调里只改内存计数，不写日志（实测在定时器回调里做文件 I/O 不可靠）
-static void autotest_step_cb(lv_timer_t *t)
-{
-    (void)t;
-    g_autotest_step++;
-}
+// 自动测试的进度计数（由桌面等待循环维护，看门狗负责打日志）
 
 void lios_autotest_start(void)
 {
