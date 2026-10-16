@@ -1,5 +1,6 @@
 #include "my_main.h"
 #include "uiTrace.h"
+#include "statusBar.h"
 #include <signal.h>
 #include <fcntl.h>
 #include <unistd.h>
