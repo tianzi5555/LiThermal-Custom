@@ -344,10 +344,7 @@ static void tile_activate(int idx)
 // 每 500ms 打一条心跳来证明 UI 线程是否还活着（用来区分「死锁卡死」和「崩溃」）。
 // 默认关闭：只有 /tmp/lios_autotest 存在 + 启动参数带 --debug-lios 才会跑。
 
-static lv_timer_t *g_hb_timer = NULL;
-static volatile int g_hb_seq = 0;      // 心跳次数（由定时器回调加）
 static volatile uint32_t g_ui_beat = 0; // UI 线程每转一圈 +1（HAL::lv_loop 里喂）
-static volatile int g_probe_cnt = 0;   // 探测定时器（500ms）触发次数
 static volatile int g_autotest_step = 0; // 自动测试走到第几步
 static volatile int g_tile_open_cnt = 0; // 「打开方块」成功执行了几次
 static volatile int g_app_exit_cnt = 0;  // 「退出应用」成功执行了几次
@@ -360,22 +357,7 @@ void lios_ui_beat(void)
     g_ui_beat++;
 }
 
-static void autotest_probe_cb(lv_timer_t *t)
-{
-    (void)t;
-    g_probe_cnt++;
-}
-
-// 注意：**定时器回调里不要调 lios_log**（实测在这台机器上定时器回调里写文件会卡住，
-// 心跳计数其实一直在涨，但日志就是写不出来）。所以回调只改内存里的计数，
-// 由看门狗线程（普通线程，写日志正常）负责把计数打到日志里。
-static void autotest_hb_cb(lv_timer_t *t)
-{
-    (void)t;
-    g_hb_seq++;
-}
-
-// 同样在 lv_timer_handler（已持锁）里跑：只能调 *_locked 版本
+// 定时器回调里只改内存计数，不写日志（实测在定时器回调里做文件 I/O 会不可靠）
 static void autotest_step_cb(lv_timer_t *t)
 {
     g_autotest_step++;
@@ -391,11 +373,6 @@ static void autotest_step_cb(lv_timer_t *t)
         break;
     case 3:
         lv_timer_del(t);
-        if (g_hb_timer != NULL)
-        {
-            lv_timer_del(g_hb_timer);
-            g_hb_timer = NULL;
-        }
         break;
     default:
         break;
@@ -404,18 +381,15 @@ static void autotest_step_cb(lv_timer_t *t)
 
 void lios_autotest_start(void)
 {
-    int r = access("/tmp/lios_autotest", F_OK);
-    lios_log("autotest 入口: access(/tmp/lios_autotest)=%d", r);
-    if (r != 0)
+    if (access("/tmp/lios_autotest", F_OK) != 0)
         return;
     lios_log("=== autotest 已启用（/tmp/lios_autotest 存在）===");
-    // 这里**只登记意图**，真正的 lv_timer_create 交给看门狗线程在 UI 线程跑起来之后做。
-    // 实测教训：在 UI 线程（HAL::lv_loop）还没开始跑之前从主线程建的 LVGL 定时器
-    // 不会被触发（心跳定时器因为是在 UI 线程起来之后建的，所以一直正常）。
+    // 这里**只登记意图**，真正的 lv_timer_create 交给 HAL 线程在桌面显示期间做
+    //（必须等 UI 线程跑起来；实测 UI 线程起来之前建的 LVGL 定时器不会被触发）
     g_autotest_wanted = true;
 }
 
-// 由看门狗线程在 UI 线程跑起来之后调用（同一入口只做一次）
+// 由看门狗线程 / HAL 线程在 UI 线程跑起来之后调用（一次性）
 static void autotest_arm_timers(void)
 {
     static bool armed = false;
@@ -427,12 +401,9 @@ static void autotest_arm_timers(void)
     armed = true;
     g_autotest_armed_done = true;
     LOCKLV();
-    g_hb_timer = lv_timer_create(autotest_hb_cb, 500, NULL);
-    lv_timer_t *st = lv_timer_create(autotest_step_cb, 3000, NULL);
-    lv_timer_t *pr = lv_timer_create(autotest_probe_cb, 500, NULL);
+    lv_timer_create(autotest_step_cb, 3000, NULL);
     UNLOCKLV();
-    lios_log("autotest: 定时器已建 hb=%p step=%p probe=%p（NULL 表示创建失败）",
-             (void *)g_hb_timer, (void *)st, (void *)pr);
+    lios_log("autotest: 已启动（3 秒后自动打开第一个方块，6 秒后退出应用）");
 }
 
 // ---------------------------------------------------------------- 看门狗
@@ -455,16 +426,15 @@ static void *lios_watchdog_thread(void *)
     // 等 UI 线程跑起来，再把自动测试的定时器建出来
     // （同样是因为「UI 线程起来之前建的 LVGL 定时器不会触发」这个坑）
     usleep(2000 * 1000);
-    lios_log("看门狗: 准备 arm 自动测试（wanted=%d）", g_autotest_wanted ? 1 : 0);
     autotest_arm_timers();
     while (!g_wd_stop)
     {
         usleep(500 * 1000);
         if (g_wd_stop)
             break;
-        if (++tick % 4 == 0) // 每 2 秒记一次：心跳值 + 自动测试进度
-            lios_log("看门狗: ui_beat=%u probe=%d step=%d tile_open=%d app_exit=%d",
-                     (unsigned)g_ui_beat, g_probe_cnt, g_autotest_step, g_tile_open_cnt, g_app_exit_cnt);
+        if (g_autotest_wanted && ++tick % 4 == 0) // 自动测试时才每 2 秒报一次进度
+            lios_log("看门狗: ui_beat=%u step=%d tile_open=%d app_exit=%d",
+                     (unsigned)g_ui_beat, g_autotest_step, g_tile_open_cnt, g_app_exit_cnt);
         if (g_ui_beat == last)
         {
             stuck++;

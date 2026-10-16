@@ -1,131 +1,138 @@
 # LiOS 第二期 部署记录 / 使用说明 / 回滚手册
 
-> 本文对应第二期（真桌面 + 插件框架 + 双向模式切换）。
-> **已部署固件 MD5 `e4bdaccc8a125dcb1cd3933a0a64caa7`**（size 1,593,900，CI run 96）。
-> 源码仓库 `tianzi5555/LiThermal-Custom`，第二期提交：`b773afc` → `cff714e` → `aa62ac4` → `561855b`。
+> 第二期（真桌面 + 插件框架 + 双向模式切换）+ 两个实测 bug 的修复。
+> 源码仓库 `tianzi5555/LiThermal-Custom`。
 > 第一期文档见 `docs/LiOS_第一期_部署与回滚.md`。
->
-> 部署时实测：干净重启后 `ps` 显示 `/mnt/UDISK/LiThermal --login`，
-> `/tmp/lios.log` = 「密码界面已显示」，`/mnt/UDISK/crash.log` **不存在**（无崩溃），
-> 连续观察 1 分钟进程稳定。
 
-## 一、第二期做了什么
+## 〇、登录界面行为（用户最新要求）
 
-### 1. 登录界面「三步退出」（防误触绕过密码）
-原来按一下菜单键就退出登录进相机，现在改成：
+* **只有输对密码才能离开登录界面**：
+  * `camera` 密码（默认 `123456`）→ 进相机
+  * `lios` 密码（默认 `5555`）→ 进 LiOS 桌面
+  * 其它输入 → 「密码错误，请重输」，**绝不放行进相机**
+* **菜单键 / 录像键在登录界面不做任何事**（按了只把提示行刷回「请输入密码」）
+  * 原来的「菜单 → 录像 → 确认」三步退出登录手势**已按要求彻底删除**，底部提示小字也删了
+* 唯一的豁免通道（防锁死兜底）：`/mnt/UDISK/lios.conf` **缺失/解析失败 → 直接进相机**
+* 密码长度上限 16 位；输入框显示成圆点；连错 6 次多一句提示
+
+## 一、两个实测 bug 的根因与修法
+
+### Bug 1：「输 5555 也进相机」
+真因**不在密码比对**，而在登录之后的模式切换链路崩了：
+
+* `src/main.cpp`：LiOS 启动路径下，UI 线程（`HAL::lv_loop`）是 launcher 线程在
+  `enter_camera()` 里创建的，而 main 在 `lios_enter()` 之后**立刻**
+  `pthread_join(thread_ui)` —— 此时 `thread_ui` 还是 0（无效线程号）→
+  musl 里解引用空指针 → **SIGSEGV，fault addr 0x1c**（crash.log 里的记录）
+* 进程被 `thermalcamera.sh` 的降级循环拉起来时是**不带 `--login`** 的 → 直接进相机界面
+  → 用户看到的现象就是「输 5555 也进相机」
+
+修法：
+* `src/main.cpp`：改成等 `lios_camera_ready()` 为真、且 `thread_ui != 0` 才 join
+* `enter_camera()`：`pthread_create` 成功就立刻置位 `g_camera_ready` 并记日志
+
+**设备上的证据**（`LiThermal --selftest-pw` 只读自检，不打印明文）：
 ```
-菜单键 → 录像键 → 波轮确认键（按下滚轮）
+配置 /mnt/UDISK/lios.conf: camera密码 len=6 sum=2565028831 / lios密码 len=4 sum=120065352
+密码判定: camera（输入 len=6 sum=2565028831）
+密码判定: lios（输入 len=4 sum=120065352）      ← 5555 判定为 lios
+密码判定: reject（输入 len=4 sum=276376848）
 ```
-* 中间任何一步按错、或两步之间超过 **4 秒** → 作废回待机，底部提示「已取消，重来：菜单>录像>确认」
-* 界面底部**常驻**一行小字：`退出登录：菜单 > 录像 > 确认（直接进相机）`
-* 密码输入流程完全不变
+运行期日志也证明 5555 走的是 lios 分支：
+```
+点确定：输入 len=4
+密码判定: lios（输入 len=4 sum=120065352）
+登录分流确定: lios -> LiOS 桌面
+```
 
-### 2. 真桌面（替换原「建设中」占位桌面）
-`src/lios/lios_launcher.cpp`（原 `lios_desktop.cpp` 已删除）
+### Bug 2（严重）：「进 LiOS 后点任何方块整机卡死」
+根因：**LVGL 事件回调里重复获取非递归互斥锁 → 自锁死**
 
-* **3 列 × 3 行方块网格**：一格一个应用，滚轮移动高亮、按下进入；超过 9 个可上下滚动
-* 内置 5 个方块：
+* `src/lios/lios_launcher.cpp` 的 `tile_click_cb`（旧代码）里有两处 `LOCKLV()`
+* 而 LVGL 的输入事件是在 `lv_timer_handler()` **内部**派发的
+  （`lv_indev_read_timer_cb` → `indev_encoder_proc` → `lv_event_send(..., LV_EVENT_CLICKED)`），
+  `lv_timer_handler()` 又是在 `HAL::lv_loop()` 的 `LOCKLV()` 里调的
+* 也就是说：**事件回调执行时本线程已经持有 `lv_mutex`**；
+  `lv_mutex` 是 `pthread_mutex_init(&lv_mutex, NULL)` 建的**非递归**锁 →
+  回调里再 `LOCKLV()` 立刻自锁死：
+  * UI 线程永久阻塞 → 屏幕不刷新、按键不处理
+  * HAL 线程随后在 `refresh_poweroff_key → lv_ui_poweroff` 也要拿这把锁 → 一起卡死
+  * → **长按电源键无反应，只能断电**（与实测现象完全一致）
 
-  | 方块 | 图标 | 行为 |
-  |---|---|---|
-  | 相机 | 相 | 切回相机界面 |
-  | 文件管理 | 文 | 本期「建设中」占位页（下一期实现） |
-  | 设置 | 设 | 同上 |
-  | 权限管理 | 权 | 同上 |
-  | 后台 | 后 | 同上 |
+修法（双保险）：
+1. `src/lios/lios_launcher.cpp`：把「进应用 / 退应用」拆成两层 ——
+   `tile_activate_locked()` / `app_exit_locked()`（调用者须已持锁）
+   和 `tile_activate()` / `app_exit()`（自己加锁）。
+   **LVGL 事件回调、LVGL 定时器回调一律只调 `*_locked`，绝不再 `LOCKLV`。**
+2. `src/main.cpp`：`lv_mutex` 改成 **递归锁**（`PTHREAD_MUTEX_RECURSIVE`）——
+   以后即使再有人在回调里误写 `LOCKLV()`，最多多记一次引用计数，也不会锁死整机。
 
-* 底部提示行：`滚轮选择  按下进入  菜单键回相机`
+顺带加固：
+* 应用占屏期间 `lv_indev_enable(NULL, false)` 关掉输入，防止滚轮把 group 焦点改到桌面方块
+* 删应用容器前先把焦点挪回还活着的方块，避免 group 里留野焦点
+* 新增**看门狗**：UI 心跳（`HAL::lv_loop` 每圈的计数器）停 3 秒 →
+  写 `/tmp/lios.log` + `_exit(99)`，让 `thermalcamera.sh` 的降级循环重启相机
+  （宁可重启也不留死屏 / 电源键无反应）
 
-### 3. 插件框架（扫描 + dlopen）
-* 扫描 `/mnt/UDISK/apps/*.so`，`dlopen(RTLD_NOW)` 后读 `lios_app_info`
-  （也兼容函数式导出 `lios_app_info_get()`），校验 `lios_app_create` /
-  `lios_app_destroy` / `lios_app_key` 三个符号是否齐全
-* 按 `order` 排序（内置「相机」order=0 永远第一），与内置方块合并显示
-* 选中插件：建全屏容器 → `lios_app_create(container)` → 按键转发 `lios_app_key(key,event)`
-  （滚轮上/下、确认、录像、菜单）→ 退出时 `lios_app_destroy()` + `dlclose()`
-* **任何失败都不会让桌面崩**：dlopen 失败 / 缺符号 / id 重复 / 超数量上限 →
-  写 `/tmp/lios.log` 后跳过该应用，桌面照常显示其它方块
-* `/mnt/UDISK/apps` 目录不存在 = 正常情况（只显示内置方块）
-* 插件想自己退出（比如它自己画了个返回按钮），调 `lios_app_request_exit()` 即可，
-  真正的清理由桌面线程做（避免插件在自己的回调里删自己的对象）
-* 主程序已加 `-rdynamic`（`CMakeLists.txt` 里的 `CMAKE_EXE_LINKER_FLAGS`），
-  否则插件 `dlopen` 会解析不到 `lv_*` 符号而失败
+**设备上的自动测试证据**（`--debug-lios` + `/tmp/lios_autotest`，无人值守自己点方块）：
+```
+autotest: 已启动（3 秒后自动打开第一个方块，6 秒后退出应用）
+看门狗: ui_beat=575  step=0 tile_open=0 app_exit=0
+看门狗: ui_beat=802  step=1 tile_open=1 app_exit=0    ← 打开方块成功
+看门狗: ui_beat=1254 step=2 tile_open=1 app_exit=1    ← 退出应用成功
+看门狗: ui_beat=1478 step=3 tile_open=1 app_exit=1
+看门狗: ui_beat=1923 step=3 tile_open=1 app_exit=1    ← UI 心跳一直在涨 = 没死锁
+```
+`ui_beat` 每次采样都在大幅增长，说明整个「进方块 → 退出」过程中 UI 线程始终在跑；
+进程没崩、看门狗没触发。
 
-### 4. 双向模式切换（不用重启程序）
-* **LiOS → 相机**：网格里的「相机」方块，或者菜单键
-* **相机 → LiOS**：隐藏 SH 终端里的「进LiOS」按钮
-  （系统设置 → 手动清除噪声 → 录像键 → 终端右上角第 4 个按钮）
-  * 为此把终端顶部那一行改成 4 个 60px 按钮：`USB状态 / 恢复USB / 清除日志 / 进LiOS`
-  * **现有操作习惯一个都没动**：终端入口手势、菜单键、相册、隐藏相册全照旧
-* 相机线程在 LiOS 期间**待机**（不读图、不刷相机界面），回到相机自动恢复
-* `enter_camera()` 幂等：只真正初始化一次
-
-### 5. 字体
-`_tools/gen_font.py` 的扫描表已包含 `src/lios/`，另外补了 `· ← ↑ → ↓` 这几个符号
-（它们既不在 ASCII 也不在 CJK 区间，原来会漏）。桌面新增的汉字
-（台/权/管/限/建/设/中/后…）都已在字体里，`_tools/lios_fontcheck.py` 检查通过。
-
-## 二、按键映射（LiOS 桌面）
+## 二、桌面怎么用（按键映射）
 
 | 位置 | 滚轮转 | 滚轮按下 | 菜单键 |
 |---|---|---|---|
 | 桌面（无应用） | 在方块间移动高亮 | 进入选中的方块 | 回相机 |
-| 内置应用（建设中页） | 无 | 无 | 返回桌面 |
-| 插件应用 | 转发给插件（`LIOS_KEY_UP/DOWN`） | 转发（`LIOS_KEY_ENTER`） | 转发 `LIOS_KEY_BACK`，然后退出该应用 |
+| 内置应用（「建设中」占位页） | 无 | 无 | 返回桌面 |
+| 插件应用 | 转发 `LIOS_KEY_UP/DOWN` | 转发 `LIOS_KEY_ENTER` | 转发 `LIOS_KEY_BACK` 后退出 |
 
-录像键在插件里转发为 `LIOS_KEY_REC`；电源键长按仍是原来的关机逻辑。
+* 网格 3 列，内置 5 个方块：**相机 / 文件管理 / 设置 / 权限管理 / 后台**
+* **LiOS → 相机**：「相机」方块 或 菜单键
+* **相机 → LiOS**：系统设置 → 手动清除噪声 → 录像键（进隐藏 SH 终端）→ 右上角 **「进LiOS」**
+* 插件：`/mnt/UDISK/apps/*.so`，失败/缺符号只写 `/tmp/lios.log` 并跳过，桌面不崩
 
-## 三、需要验收的几下
+## 三、部署与回滚
 
-1. 开机登录界面：底部应有两行小字（手势提示 + 状态），输 `123456` → 进相机（一切照旧）。
-2. 开机输 `5555` → 进 LiOS 桌面：应看到 **3×2 共 5 个方块**（相机/文件管理/设置/权限管理/后台）。
-3. 桌面上滚轮转 → 高亮跟着走；选「文件管理」按下 → 显示「建设中」占位页；菜单键 → 回桌面。
-4. 选「相机」方块按下（或桌面上按菜单键）→ 回到相机界面，温度/状态条/相册/隐藏终端都正常。
-5. 相机界面进隐藏终端（系统设置→手动清除噪声→录像键），按右上角 **「进LiOS」** → 应切回 LiOS 桌面（**不用重启**）。
-6. 登录界面按 **菜单→录像→确认** → 应直接进相机；只按一步等 5 秒 → 应提示「已取消，重来：菜单>录像>确认」。
-7. 插件链路（要等第三期把 ball/tetris 编成 .so 才能验）：把 .so 放进 `/mnt/UDISK/apps/`，
-   重启程序 → 桌面应多出对应方块；日志 `/tmp/lios.log` 里能看到加载成功/跳过原因。
-
-## 四、回滚
-
-### 1. 回到第二期之前的固件（第一期那版）
+### 回滚命令
 ```bash
+# 回本轮修复之前的版本
+adb -s 20080411 shell "cp -f /mnt/UDISK/LiThermal.bak_lios3 /mnt/UDISK/LiThermal; sync; reboot -f"
+# 回第一期（有登录界面、无真桌面）
 adb -s 20080411 shell "cp -f /mnt/UDISK/LiThermal.bak_lios2 /mnt/UDISK/LiThermal; sync; reboot -f"
-```
-* `LiThermal.bak_lios2` = 第二期部署前的固件（= 第一期最终版，MD5 `557d54d1c4c7eeb1b6e82d063cdc44e5`）
-
-### 2. 回到最初的相机固件（没有 LiOS）
-```bash
+# 回最初的纯相机固件
 adb -s 20080411 shell "cp -f /mnt/UDISK/LiThermal.bak_lios1 /mnt/UDISK/LiThermal; cp -f /mnt/UDISK/thermalcamera.sh.bak_lios1 /mnt/UDISK/thermalcamera.sh; sync; reboot -f"
-```
-* `LiThermal.bak_lios1` MD5 `8d40a21beb5964aab6e9d4dc504bac63`（最初那版）
-* `thermalcamera.sh.bak_lios1` = 最初的启动脚本（直接跑相机、不带 `--login`）
-
-### 3. 只回滚启动脚本
-```bash
-adb -s 20080411 shell "cp -f /mnt/UDISK/thermalcamera.sh.bak_lios2 /mnt/UDISK/thermalcamera.sh; sync; reboot -f"
-```
-
-### 4. 临时停用密码界面
-```bash
+# 忘记密码时的救援：把配置移走，开机直接进相机
 adb -s 20080411 shell "mv /mnt/UDISK/lios.conf /mnt/UDISK/lios.conf.off; sync; reboot -f"
 ```
 
-### 5. 卡在 LiOS 桌面出不来（极端情况）
-* 菜单键 → 回相机；或用「相机」方块
-* 都不行就重启相机（长按电源键）
+## 四、排查用的自检入口（默认不影响正常使用）
 
-相机上已有的备份一个都没删：`bak_lios1` / `bak_lios2` / `bak_nodoublebuffer` /
-`bak_perfprobe` / `bak_probe1`，脚本备份 `thermalcamera.sh.bak_lios1` / `.bak_lios2`。
+| 入口 | 用法 | 作用 |
+|---|---|---|
+| `--selftest-pw` | `adb shell /mnt/UDISK/LiThermal --selftest-pw` | 只读自检：把 lios.conf 解析结果和三条密码判定写进 `/tmp/lios.log`（只输出长度/校验和，不显示界面、不改文件） |
+| `--debug-lios` | 手动启动时加 | 跳过登录直接进桌面（调试用） |
+| `/tmp/lios_autotest` | 建了这个空文件再启动 | 自动测试：3 秒后自动打开第一个方块、6 秒后退出应用；配合看门狗每 2 秒报进度（默认关闭，不建文件就不跑） |
 
-## 五、部署时踩到的坑（留给以后）
+日志都在 `/tmp`（`lios.log` / `perf.log`），按红线要求**不写 SD 卡**。
 
-* **`thermalcamera.sh` 不在 CI 产物里**：`build_custom.sh` 打包用的是编译器仓库
-  `lxydiy/LiThermal_Compiler` 根目录的那份，而当前 token 对它没有写权限。
-  以后每次重新部署固件后都要单独把本仓库根目录的 `thermalcamera.sh` 推到相机，
-  否则新固件会以「不带 --login」的方式启动（功能正常，但没有密码界面）。
-* 第二期部署时相机的 adb 掉线过（Windows 里设备在、adb 只认到 offline，
-  `kill-server`/`start-server`/`reconnect offline` 都救不回来），
-  最后是**拔插一次 USB 线**恢复的。部署脚本：
-  `LiThermalNet\tools\deploy_lios2_wait.ps1`（会等设备上线再自动部署）。
-* 插件的 `.so` 必须能解析到主程序的 LVGL 符号 → 主程序编译时要有 `-rdynamic`。
+## 五、踩过的坑（给以后的会话）
+
+1. **LVGL 事件/定时器回调里绝对不要 `LOCKLV()`** —— 回调是在 `lv_timer_handler()` 内部
+   被派发的，那时锁已经在手里；非递归锁会自锁死整机。现在锁已改成递归锁兜底，但仍应遵守。
+2. **不要在定时器回调里做文件 I/O**（`fopen/fprintf`）—— 实测写不出来，会让「日志死了」
+   看起来像「线程死了」。要报进度就用普通线程（比如看门狗）去打日志。
+3. **UI 线程（`HAL::lv_loop`）跑起来之前创建的 LVGL 定时器不会被触发** ——
+   要建定时器就等 UI 线程起来之后（本项目现在是在 HAL 线程的桌面轮询里建）。
+4. `main` 不要在 LiOS 启动路径下直接 `pthread_join(thread_ui)`：那是 launcher 线程建的，
+   可能还是 0。等 `lios_camera_ready()`。
+5. `thermalcamera.sh` 不在 CI 产物里（编译器仓库无写权限），每次部署固件后要单独推脚本。
+6. adb 偶发掉线（`offline`）：`kill-server`/`start-server`/`reconnect offline` 都救不回来时，
+   让用户**拔插一次 USB 线**即可；`LiThermalNet\tools\deploy_lios2_fast.ps1` 会等设备上线自动部署。
