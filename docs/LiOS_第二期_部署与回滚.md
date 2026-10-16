@@ -1,8 +1,13 @@
 # LiOS 第二期 部署记录 / 使用说明 / 回滚手册
 
 > 本文对应第二期（真桌面 + 插件框架 + 双向模式切换）。
-> 源码仓库 `tianzi5555/LiThermal-Custom`，第二期提交：`b773afc` → `cff714e` → `aa62ac4`。
+> **已部署固件 MD5 `e4bdaccc8a125dcb1cd3933a0a64caa7`**（size 1,593,900，CI run 96）。
+> 源码仓库 `tianzi5555/LiThermal-Custom`，第二期提交：`b773afc` → `cff714e` → `aa62ac4` → `561855b`。
 > 第一期文档见 `docs/LiOS_第一期_部署与回滚.md`。
+>
+> 部署时实测：干净重启后 `ps` 显示 `/mnt/UDISK/LiThermal --login`，
+> `/tmp/lios.log` = 「密码界面已显示」，`/mnt/UDISK/crash.log` **不存在**（无崩溃），
+> 连续观察 1 分钟进程稳定。
 
 ## 一、第二期做了什么
 
