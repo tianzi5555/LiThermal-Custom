@@ -1,10 +1,10 @@
 name: Build T113 kernel with thermal sensor (CPU temp)
 
-# 缁?LiThermal 鐩告満锛圱113-S3 / Tina Linux 5.4.61锛夌紪涓€涓€愬甫娓╁害浼犳劅鍣ㄩ┍鍔ㄣ€戠殑鍐呮牳銆?#
-# 涓轰粈涔堝繀椤婚噸缂栧唴鏍歌€屼笉鏄姞妯″潡锛?#   CONFIG_THERMAL锛坱hermal 妗嗘灦鏍稿績锛夋槸 bool锛屽彧鑳藉唴寤猴紱鐩告満鐜板湪娌″紑锛?#   鎵€浠?SINXI_THERMAL 鍗充究鏄?tristate 涔熸病娉曞崟鐙紪鎴愭ā鍧楃敤銆?#
-# 鍙敼涓ゅ銆佸埆鐨勪繚鎸佺浉鏈哄師閰嶇疆锛?#   CONFIG_THERMAL=y
+# 缂?LiThermal 閻╁憡婧€閿涘湵113-S3 / Tina Linux 5.4.61閿涘绱稉鈧稉顏傗偓鎰敨濞撯晛瀹虫导鐘冲妳閸ｃ劑鈹嶉崝銊ｂ偓鎴犳畱閸愬懏鐗抽妴?#
+# 娑撹桨绮堟稊鍫濈箑妞ゅ鍣哥紓鏍у敶閺嶆瓕鈧奔绗夐弰顖氬濡€虫健閿?#   CONFIG_THERMAL閿涘澅hermal 濡楀棙鐏﹂弽绋跨妇閿涘妲?bool閿涘苯褰ч懗钘夊敶瀵ょ尨绱遍惄鍛婃簚閻滄澘婀▽鈥崇磻閿?#   閹碘偓娴?SINXI_THERMAL 閸楀厖绌堕弰?tristate 娑旂喐鐥呭▔鏇炲礋閻欘剛绱幋鎰侀崸妤冩暏閵?#
+# 閸欘亝鏁兼稉銈咁槱閵嗕礁鍩嗛惃鍕箽閹镐胶娴夐張鍝勫斧闁板秶鐤嗛敍?#   CONFIG_THERMAL=y
 #   CONFIG_SUNXI_THERMAL=y
-# vermagic 浠嶆槸 5.4.61 SMP preempt...锛屾墍浠ョ幇鏈夌殑搴旂敤鍜屽叾瀹冩ā鍧椾笉鍙楀奖鍝嶃€?
+# vermagic 娴犲秵妲?5.4.61 SMP preempt...閿涘本澧嶆禒銉у箛閺堝娈戞惔鏃傛暏閸滃苯鍙剧€瑰啯膩閸фぞ绗夐崣妤€濂栭崫宥冣偓?
 on:
   workflow_dispatch:
   push:
@@ -18,27 +18,26 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 180
     steps:
-      - name: 鍙栧嚭鏈粨搴?        uses: actions/checkout@v4
+      - name: 閸欐牕鍤張顑跨波鎼?        uses: actions/checkout@v4
 
-      - name: 瀹夎渚濊禆
+      - name: 鐎瑰顥婃笟婵婄
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq build-essential bc bison flex libssl-dev libelf-dev \
             libncurses5-dev rsync cpio kmod python3 wget xz-utils device-tree-compiler
 
-      - name: 鎷夊彇浜ゅ弶宸ュ叿閾撅紙涓庣浉鏈哄唴鏍稿悓娆?gcc 6.4.1 musl锛?        run: |
+      - name: 閹峰褰囨禍銈呭级瀹搞儱鍙块柧鎾呯礄娑撳海娴夐張鍝勫敶閺嶇鎮撳▎?gcc 6.4.1 musl閿?        run: |
           git clone --depth 1 https://github.com/diylxy/LiThermal_Compiler.git tc
           ls tc/toolchain-sunxi-musl/toolchain/bin | grep -E 'gcc' | head -5
 
-      - name: 鎷夊彇鍐呮牳婧愮爜锛圱113 Tina Linux 5.4.61锛?        run: |
+      - name: 閹峰褰囬崘鍛壋濠ф劗鐖滈敍鍦?13 Tina Linux 5.4.61閿?        run: |
           git clone --depth 1 https://github.com/Noooooob233/tina-d1-linux-5.4.git linux
           cd linux
           head -5 Makefile
           grep -E '^(VERSION|PATCHLEVEL|SUBLEVEL) =' Makefile
           touch .scmversion
 
-      - name: 鐢ㄧ浉鏈洪厤缃?+ 鎵撳紑娓╁害椹卞姩
-        run: |
+      - name: 閻劎娴夐張娲帳缂?+ 閹垫挸绱戝〒鈺佸妞瑰崬濮?        run: |
           set -e
           export PATH="$GITHUB_WORKSPACE/tc/toolchain-sunxi-musl/toolchain/bin:$PATH"
           export ARCH=arm
@@ -60,14 +59,14 @@ jobs:
           force_kv THERMAL_OF y
           force_kv THERMAL_WRITABLE_TRIPS n
           force_kv THERMAL_DEFAULT_GOV_STEP_WISE y
-          # 鐩告満鍐呮牳娌″鍑?__stack_chk_guard锛屼繚鎸佷笌鍘熷唴鏍镐竴鑷寸殑鏍堜繚鎶よ缃紙鍘熼厤缃氨鏄?y锛屽埆鍔級
+          # 閻╁憡婧€閸愬懏鐗冲▽鈥愁嚤閸?__stack_chk_guard閿涘奔绻氶幐浣风瑢閸樼喎鍞撮弽闀愮閼峰娈戦弽鍫滅箽閹躲倛顔曠純顕嗙礄閸樼喖鍘ょ純顔兼皑閺?y閿涘苯鍩嗛崝顭掔礆
           make ARCH=arm CROSS_COMPILE=$CROSS_COMPILE olddefconfig
-          echo "=== 纭 ==="
+          echo "=== 绾喛顓?==="
           grep -E '^CONFIG_(THERMAL|SUNXI_THERMAL|THERMAL_OF|MODVERSIONS|MODULE_SIG|LOCALVERSION)' .config || true
-          grep -q '^CONFIG_THERMAL=y' .config || { echo "!! THERMAL 娌℃墦寮€"; exit 1; }
-          grep -q '^CONFIG_SUNXI_THERMAL=y' .config || { echo "!! SUNXI_THERMAL 娌℃墦寮€"; exit 1; }
+          grep -q '^CONFIG_THERMAL=y' .config || { echo "!! THERMAL 濞屸剝澧﹀鈧?; exit 1; }
+          grep -q '^CONFIG_SUNXI_THERMAL=y' .config || { echo "!! SUNXI_THERMAL 濞屸剝澧﹀鈧?; exit 1; }
 
-      - name: 缂栬瘧鍐呮牳涓庤澶囨爲
+      - name: 缂傛牞鐦ч崘鍛壋娑撳氦顔曟径鍥ㄧ埐
         run: |
           set -o pipefail
           export PATH="$GITHUB_WORKSPACE/tc/toolchain-sunxi-musl/toolchain/bin:$PATH"
@@ -75,14 +74,17 @@ jobs:
           export CROSS_COMPILE=arm-openwrt-linux-muslgnueabi-
           export STAGING_DIR="$GITHUB_WORKSPACE/tc/target"
           cd linux
+          # Allwinner 的 zImage 目标依赖 dtbs，但 dtbs 需要 board.dtb（本配置里没定义）；
+          # 我们不换设备树（温度节点已在相机现有 dtb 里），所以放个占位文件骗过 make。
+          touch arch/arm/boot/dts/board.dtb
           make -j"$(nproc)" zImage 2>&1 | tail -60
-          echo "===== 浜х墿 ====="
+          echo "===== 娴溠呭⒖ ====="
           ls -l arch/arm/boot/zImage
-          echo "===== vermagic 鏉ユ簮锛堝唴鏍哥増鏈級====="
+          echo "===== vermagic 閺夈儲绨敍鍫濆敶閺嶅摜澧楅張顒婄礆====="
           cat include/config/kernel.release 2>/dev/null || true
           strings arch/arm/boot/zImage | grep -m3 '5\.4\.61'
 
-      - name: 涓婁紶鍐呮牳
+      - name: 娑撳﹣绱堕崘鍛壋
         uses: actions/upload-artifact@v4
         with:
           name: t113-kernel-thermal
