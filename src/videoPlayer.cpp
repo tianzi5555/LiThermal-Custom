@@ -15,6 +15,8 @@ static lv_obj_t *zoom_pip = NULL;      // 右下角鸟览图容器
 static lv_obj_t *zoom_pip_img = NULL;  // 鸟览图图像
 static lv_obj_t *zoom_pip_rect = NULL; // 鸟览图中的当前区域框
 int g_last_crop[6] = {0, 0, 0, 0, 0, 0}; // cropX,cropY,cropW,cropH,srcW,srcH
+// 鸟览图区域框上一次已经设置过的裁剪区域，用来挡掉每帧重复的 set_pos/set_size
+static int s_pip_last_crop[6] = {-1, -1, -1, -1, -1, -1};
 
 pthread_t thread_image_ref;
 static sem_t sem_video;
@@ -64,12 +66,32 @@ static void ui_zoom_pip_create()
     lv_obj_clear_flag(zoom_pip_rect, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_add_flag(zoom_pip, LV_OBJ_FLAG_HIDDEN);
+
+    // 容器重建时清掉区域框的“已应用”缓存，保证下面第一帧一定会重新摆一次
+    for (int i = 0; i < 6; i++)
+        s_pip_last_crop[i] = -1;
 }
 
 static void ui_zoom_pip_update(int cropX, int cropY, int cropW, int cropH, int srcW, int srcH)
 {
     if (zoom_pip_rect == NULL || srcW <= 0 || srcH <= 0)
         return;
+
+    // 裁剪区域只有用户转动旋钮改变倍数时才会变，其余每一帧都是同一组值。
+    // 而 lv_obj_set_pos/lv_obj_set_size 在 LVGL 8.4 里即使值没变也会
+    // invalidate 对象（还会顺带 mark_layout_as_dirty），这个函数是每帧、
+    // 而且是持 lv_mutex 调用的，所以要把重复设置挡掉，别白白拉长临界区。
+    // 显示效果不变：位置/尺寸和原来每帧设成同样的值完全一致。
+    if (s_pip_last_crop[0] == cropX && s_pip_last_crop[1] == cropY &&
+        s_pip_last_crop[2] == cropW && s_pip_last_crop[3] == cropH &&
+        s_pip_last_crop[4] == srcW && s_pip_last_crop[5] == srcH)
+        return;
+    s_pip_last_crop[0] = cropX;
+    s_pip_last_crop[1] = cropY;
+    s_pip_last_crop[2] = cropW;
+    s_pip_last_crop[3] = cropH;
+    s_pip_last_crop[4] = srcW;
+    s_pip_last_crop[5] = srcH;
 
     int rx = cropX * ZOOM_PIP_W / srcW;
     int ry = cropY * ZOOM_PIP_H / srcH;
@@ -176,6 +198,61 @@ static void build_luma_map(uint8_t map[256], const uint8_t *src, int srcW, int s
     }
 }
 
+// 最近邻缩放的索引表
+//
+// 原来 320x240 的内层循环每帧都要做 320*240 次整数除法（cropX + x*cropW/320），
+// 鸟览图再加 96*72 次；ARMv7 上整数除法要几十个周期，光这一项每帧就要好几毫秒，
+// 而这些索引只跟「裁剪区域 + 源尺寸」有关，也就是只在用户转动旋钮改变倍数时才变。
+// 所以把行列索引缓存成表，每帧只查表。表里的值就是用原来那条表达式算出来的，
+// 结果逐位一致，画面不会有任何变化。
+static int s_main_col_index[320];
+static int s_main_row_index[240];
+static int s_thumb_col_index[ZOOM_PIP_W];
+static int s_thumb_row_index[ZOOM_PIP_H];
+static int s_tbl_cropX = -1, s_tbl_cropW = -1, s_tbl_srcW = -1;
+static int s_tbl_cropY = -1, s_tbl_cropH = -1, s_tbl_srcH = -1;
+
+static void build_index_tables(int cropX, int cropY, int cropW, int cropH, int srcW, int srcH)
+{
+    if (s_tbl_cropX != cropX || s_tbl_cropW != cropW || s_tbl_srcW != srcW)
+    {
+        for (int x = 0; x < 320; x++)
+        {
+            int v = cropX + (x * cropW) / 320;
+            if (v >= srcW) v = srcW - 1;
+            s_main_col_index[x] = v;
+        }
+        for (int x = 0; x < ZOOM_PIP_W; x++)
+        {
+            int v = (x * srcW) / ZOOM_PIP_W;
+            if (v >= srcW) v = srcW - 1;
+            s_thumb_col_index[x] = v;
+        }
+        s_tbl_cropX = cropX;
+        s_tbl_cropW = cropW;
+        s_tbl_srcW = srcW;
+    }
+
+    if (s_tbl_cropY != cropY || s_tbl_cropH != cropH || s_tbl_srcH != srcH)
+    {
+        for (int y = 0; y < 240; y++)
+        {
+            int v = cropY + (y * cropH) / 240;
+            if (v >= srcH) v = srcH - 1;
+            s_main_row_index[y] = v;
+        }
+        for (int y = 0; y < ZOOM_PIP_H; y++)
+        {
+            int v = (y * srcH) / ZOOM_PIP_H;
+            if (v >= srcH) v = srcH - 1;
+            s_thumb_row_index[y] = v;
+        }
+        s_tbl_cropY = cropY;
+        s_tbl_cropH = cropH;
+        s_tbl_srcH = srcH;
+    }
+}
+
 static void process_frame_to_buffers(AVFrame *frame)
 {
     int srcW = frame->width;
@@ -212,19 +289,18 @@ static void process_frame_to_buffers(AVFrame *frame)
         rgb_scale[i] = ((uint32_t)luma_map[i] << 16) / (uint32_t)i;
     rgb_scale[0] = 0;
 
+    // 预计算最近邻缩放的行列索引（只在倍数变化时重算，见上面的说明）
+    build_index_tables(cropX, cropY, cropW, cropH, srcW, srcH);
+
     // 1) 主画面：裁剪区域最近邻缩放到 320x240
     uint8_t *dst = IR_frame_buffer;
     for (int y = 0; y < 240; y++)
     {
-        int srcY = cropY + (y * cropH) / 240;
-        if (srcY >= srcH) srcY = srcH - 1;
-        const uint8_t *src_row = src + srcY * srcStride;
+        const uint8_t *src_row = src + s_main_row_index[y] * srcStride;
         uint8_t *dst_row = dst + y * 320 * 4;
         for (int x = 0; x < 320; x++)
         {
-            int srcX = cropX + (x * cropW) / 320;
-            if (srcX >= srcW) srcX = srcW - 1;
-            const uint8_t *s = src_row + srcX * 4;
+            const uint8_t *s = src_row + s_main_col_index[x] * 4;
             int b = s[0];
             int g = s[1];
             int r = s[2];
@@ -253,15 +329,11 @@ static void process_frame_to_buffers(AVFrame *frame)
     uint8_t *thumb = IR_thumb_buffer;
     for (int y = 0; y < ZOOM_PIP_H; y++)
     {
-        int srcY = (y * srcH) / ZOOM_PIP_H;
-        if (srcY >= srcH) srcY = srcH - 1;
-        const uint8_t *src_row = src + srcY * srcStride;
+        const uint8_t *src_row = src + s_thumb_row_index[y] * srcStride;
         uint8_t *thumb_row = thumb + y * ZOOM_PIP_W * 4;
         for (int x = 0; x < ZOOM_PIP_W; x++)
         {
-            int srcX = (x * srcW) / ZOOM_PIP_W;
-            if (srcX >= srcW) srcX = srcW - 1;
-            const uint8_t *s = src_row + srcX * 4;
+            const uint8_t *s = src_row + s_thumb_col_index[x] * 4;
             int b = s[0];
             int g = s[1];
             int r = s[2];

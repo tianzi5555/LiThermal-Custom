@@ -1,4 +1,5 @@
 #include <my_main.h>
+#include <string.h>
 
 lv_obj_t *crosshairs_max_obj = NULL;
 lv_obj_t *crosshairs_min_obj = NULL;
@@ -185,6 +186,8 @@ static lv_obj_t *center_pure_cross_obj = NULL; // 纯十字准星容器
 static lv_obj_t *center_label = NULL;
 static lv_obj_t *bar_h = NULL;
 static lv_obj_t *bar_v = NULL;
+// 中心温度标签当前显示的文本，用来挡掉 25Hz 的重复 lv_label_set_text
+static char s_center_label_text[32] = "";
 
 static lv_color_t crosshair_color_from_setting()
 {
@@ -246,6 +249,8 @@ void ui_center_display_create()
     lv_obj_set_style_text_font(center_label, &ui_font_chinese16, 0);
     lv_obj_align(center_label, LV_ALIGN_TOP_LEFT, 5, 5);
     lv_label_set_text(center_label, "中心 --.-");
+    // 标签是新建的，清掉“上次显示的文本”缓存，保证下一次 update 一定会写一次
+    s_center_label_text[0] = '\0';
 
     ui_center_display_updateVisibility();
 }
@@ -256,7 +261,15 @@ void ui_center_display_update()
     {
         char buf[32];
         sprintf(buf, "中心 %.1f", cameraUtils.lastCenterTemperature);
-        lv_label_set_text(center_label, buf);
+        // 这个函数在 40ms 的循环里被调用（25Hz），而 lv_label_set_text 每次都会
+        // lv_mem_free + lv_mem_alloc 一份文本、invalidate 标签并重新排版
+        // （本工程 LV_MEM_CUSTOM=1，就是直接 malloc/free）。
+        // 中心温度本来就是几百毫秒才变一次，数值没变时直接跳过即可，显示内容完全一样。
+        if (strcmp(s_center_label_text, buf) != 0)
+        {
+            strcpy(s_center_label_text, buf);
+            lv_label_set_text(center_label, buf);
+        }
     }
 }
 

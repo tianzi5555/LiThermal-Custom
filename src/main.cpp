@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
+#include <sys/time.h>
 pthread_mutex_t lv_mutex;
 
 // 崩溃记录：Tina 的 uClibc 没有 execinfo.h/backtrace，所以只记信号 + 出错地址，
@@ -90,14 +91,29 @@ void *thread_ui_func(void *)
     HAL::lv_loop();
 }
 
-/// @brief 中心点温度刷新线程：用原始 readJpegWithExtra 读取变焦中心点温度，1 秒一次
+/// @brief 中心点温度刷新线程
+///
+/// 中心温度只能从模组的 jpegPicWithAppendData 取（一次响应约 100KB：JPEG + 160x120 原始测温矩阵），
+/// 它跟 25Hz 的 getTemperature() 原本共用一把锁，两边互相排队，所以看着「刷新很慢」。
+/// 现在 readJpegWithExtra 走独立连接/独立锁（见 cameraUtils.cpp），这条链路只做两件事：
+///   1) 只在真正需要这个读数的时候才去打扰模组（主界面 + 中心温度显示开着）；
+///   2) 按固定周期跑，间隔可调。
+/// 间隔越小刷新越快、但给模组的压力越大。1000 = 原来的速度；改成 2000 更省模组。
+#define CENTER_TEMP_FETCH_MS 500
+
 void *thread_center_temp_func(void *)
 {
     while (cameraUtils.connected == false)
         usleep(100000);
     while (1)
     {
+        struct timeval begin_tv;
+        gettimeofday(&begin_tv, NULL);
+
+        // 中心温度标签被关掉（或不在主界面）时标签本来就是隐藏的，读数没人看，
+        // 这时完全不必每秒去让模组生成一张 100KB 的大响应。
         if (current_mode == MODE_MAINPAGE &&
+            globalSettings.enableCenterValueDisplay &&
             g_last_crop[2] > 0 && g_last_crop[3] > 0 &&
             g_last_crop[4] > 0 && g_last_crop[5] > 0)
         {
@@ -105,7 +121,15 @@ void *thread_center_temp_func(void *)
             int cy = (g_last_crop[1] + g_last_crop[3] / 2) * 120 / g_last_crop[5];
             cameraUtils.readJpegWithExtra(NULL, cx, cy);
         }
-        usleep(1000000);
+
+        // 把本次请求耗掉的时间从周期里扣掉，保证是「固定周期」而不是「请求 + 整周期 sleep」
+        struct timeval end_tv;
+        gettimeofday(&end_tv, NULL);
+        long used_ms = (end_tv.tv_sec - begin_tv.tv_sec) * 1000L + (end_tv.tv_usec - begin_tv.tv_usec) / 1000L;
+        if (used_ms < 0)
+            used_ms = 0;
+        if (used_ms < CENTER_TEMP_FETCH_MS)
+            usleep((useconds_t)(CENTER_TEMP_FETCH_MS - used_ms) * 1000);
     }
     return NULL;
 }

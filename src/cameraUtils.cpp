@@ -1,10 +1,21 @@
 #include "httplib.h"
 #include "cameraUtils.h"
 #include <mutex>
+#include <string.h>
 
 httplib::Client cli(CAMERA_HOST_URL);
 CameraUtils cameraUtils;
 static std::mutex cli_mutex; // httplib::Client 不是线程安全的，串行化所有 HTTP 请求
+
+// 大请求专用连接 + 专用锁
+//
+// jpegPicWithAppendData 一次响应约 100KB（JPEG 图 + 160x120 的原始测温矩阵），
+// 而 getTemperature() 是 25Hz 的小 JSON 请求。两者原来共用 cli + cli_mutex，
+// 于是互相排队：一次大请求会把 getTemperature() 顶住几百毫秒，反过来也一样，
+// 表现就是「最高/最低/中心温度刷新变慢」。
+// 这里给大请求单独一条 HTTP 连接和一把锁，两条链路彻底不再互相阻塞。
+static httplib::Client cli_thermal(CAMERA_HOST_URL);
+static std::mutex cli_thermal_mutex;
 
 #define IF_CHECK_FILENAME "/proc/net/dev"
 #define IF_CHECK_NAME "usb0"
@@ -34,6 +45,7 @@ void CameraUtils::setCameraIP()
 void CameraUtils::initHTTPClient()
 {
     cli.set_basic_auth("admin", "Ab123456");
+    cli_thermal.set_basic_auth("admin", "Ab123456");
 }
 #include <cJSON.h>
 
@@ -226,40 +238,64 @@ static std::string extract_boundary(const std::string &contentType)
     return boundary;
 }
 
-static std::vector<std::string> split_multipart(const std::string &body, const std::string &boundary)
+// multipart 里的一个分段：直接指向响应体内部，不做任何数据拷贝
+struct multipart_part_t
 {
-    std::vector<std::string> parts;
+    const char *data;
+    size_t size;
+};
+
+// 就地切分 multipart 响应。
+// 原来的实现把每一段都 substr 成 std::string（还有 vector<string> 容器），
+// 一次 100KB 的响应要额外 malloc/memcpy 两三百 KB；在 117MB 内存的机器上
+// 每秒来一发这种大块 malloc/free，会带来明显的堆抖动和缺页。
+// 切分规则（用 Content-Length 定长、按 boundary 找下一段）和原来完全一致，
+// 只是改成返回指向 body 内部的“只读切片”，不复制数据。
+static std::vector<multipart_part_t> split_multipart_ro(const std::string &body, const std::string &boundary)
+{
+    std::vector<multipart_part_t> parts;
     std::string delimiter = "--" + boundary;
+    const char *base = body.data();
     size_t start = body.find(delimiter);
     while (start != std::string::npos)
     {
         size_t start_length = body.find("Content-Length:", start);
+        if (start_length == std::string::npos)
+        {
+            break;
+        }
         size_t end_length = body.find("\r\n", start_length);
-        std::string this_part_length_str = body.substr(start_length + 15, end_length);
-        if (start_length == std::string::npos || end_length == std::string::npos)
+        if (end_length == std::string::npos)
         {
             break;
         }
-        size_t this_part_length = std::stoi(this_part_length_str);
-        start = body.find("\r\n\r\n", start) + 4;
-        size_t end = body.find(delimiter, start + this_part_length);
-        if (end != std::string::npos)
-        {
-            parts.push_back(body.substr(start, this_part_length));
-            start = end;
-        }
-        else
+        size_t this_part_length = (size_t)std::stoi(body.substr(start_length + 15, end_length));
+        size_t data_start = body.find("\r\n\r\n", start);
+        if (data_start == std::string::npos)
         {
             break;
         }
+        data_start += 4;
+        size_t end = body.find(delimiter, data_start + this_part_length);
+        if (end == std::string::npos)
+        {
+            break;
+        }
+        multipart_part_t part;
+        part.data = base + data_start;
+        part.size = this_part_length;
+        parts.push_back(part);
+        start = end;
     }
     return parts;
 }
 
 float CameraUtils::readJpegWithExtra(const char *save_filename, int result_x, int result_y)
 {
-    std::lock_guard<std::mutex> cli_lock(cli_mutex);
-    auto res = cli.Get("/ISAPI/Thermal/channels/1/thermometry/jpegPicWithAppendData?format=json");
+    // 注意：这里用 cli_thermal/cli_thermal_mutex（大请求专用），不再占用 getTemperature() 的 cli_mutex，
+    // 所以这条 100KB 的请求不会再把 25Hz 的温度轮询顶住。
+    std::lock_guard<std::mutex> cli_lock(cli_thermal_mutex);
+    auto res = cli_thermal.Get("/ISAPI/Thermal/channels/1/thermometry/jpegPicWithAppendData?format=json");
     if (res && res->status == 200)
     {
         // Parse the response headers to get the boundary string
@@ -267,7 +303,7 @@ float CameraUtils::readJpegWithExtra(const char *save_filename, int result_x, in
         std::string boundary = extract_boundary(contentType);
 
         // Split the response body into parts using the boundary string
-        std::vector<std::string> parts = split_multipart(res->body, boundary);
+        std::vector<multipart_part_t> parts = split_multipart_ro(res->body, boundary);
         if (parts.size() < 3)
         {
             printf("Failed to split multipart response\n");
@@ -275,20 +311,27 @@ float CameraUtils::readJpegWithExtra(const char *save_filename, int result_x, in
         }
         if (save_filename != NULL)
         {
+            // 落盘也直接写切片，省掉一份 100KB 的临时拷贝；写出的字节和以前完全一样
             std::ofstream file(std::string(save_filename) + ".jpeg");
             if (file.is_open())
             {
-                file << parts[1];
+                file.write(parts[1].data, (std::streamsize)parts[1].size);
                 file.close();
             }
             std::ofstream file2(std::string(save_filename) + ".raw");
             if (file2.is_open())
             {
-                file2 << parts[2];
+                file2.write(parts[2].data, (std::streamsize)parts[2].size);
                 file2.close();
             }
         }
-        lastCenterTemperature = *(float *)((uint8_t *)parts[2].c_str() + ((result_x + result_y * 160) * 4));
+        // 只要第 3 段（原始测温矩阵 160x120 float）里目标坐标的那 4 个字节，不再整段拷贝。
+        // 加边界检查：以前是无条件下标访问，模组万一返回的矩阵比预期小就会读越界。
+        size_t offset = (size_t)(result_x + result_y * 160) * 4;
+        if (offset + sizeof(float) <= parts[2].size)
+        {
+            memcpy(&lastCenterTemperature, parts[2].data + offset, sizeof(float));
+        }
         return lastCenterTemperature;
     }
     return 0.0f;
