@@ -1,0 +1,88 @@
+name: Build BW21 SD card reader firmware
+
+# 把 BW21-CBV-Kit（RTL8735B / AmebaPro2）烧成「原始扇区读卡器」：
+#   SD 卡 -> USB 大容量存储设备（MSC），给电脑的是卡的原始扇区，不走 FAT。
+#   用途：电脑上 DiskGenius 能看到 SD 卡的所有分区（含 ext4），可以直接读写/修复。
+#
+# 用的就是 SDK 自带例程 component/example/usbd_msc_new（默认后端就是 SD 卡）。
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "main" ]
+    paths:
+      - ".github/workflows/bw21_sdreader.yml"
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: 安装依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake git wget curl \
+            libssl-dev libncurses5-dev python3 python3-pip unzip
+
+      - name: 下载 AmebaPro2 SDK
+        run: |
+          git clone --depth 1 https://github.com/Ameba-AIoT/ameba-rtos-pro2.git sdk
+          du -sh sdk
+          ls sdk/component/example | grep -i msc
+
+      - name: 下载 ameba 工具链 (asdk-10.3.0)
+        run: |
+          mkdir -p "$HOME/toolchain"
+          wget -q --show-progress -O /tmp/asdk.tar.bz2 \
+            "https://github.com/Ameba-AIoT/ameba-toolchain/releases/download/V10.3.0-amebe-rtos-pro2/asdk-10.3.0-linux-newlib-build-3638-x86_64.tar.bz2"
+          tar -xjf /tmp/asdk.tar.bz2 -C "$HOME/toolchain"
+          ls "$HOME/toolchain/asdk-10.3.0/linux/newlib/bin" | head -5
+
+      - name: 确认例程存在
+        run: |
+          ls -l sdk/component/example/usbd_msc_new/
+          echo "----- 例程会自动选 SD 卡后端（USBD_MSC_SD_MODE 默认 ON）-----"
+
+      - name: 编译（USB 设备 MSC，SD 卡后端）
+        run: |
+          set -o pipefail
+          export PATH="$HOME/toolchain/asdk-10.3.0/linux/newlib/bin:$PATH"
+          cd sdk/project/realtek_amebapro2_v0_example/GCC-RELEASE
+          mkdir -p build && cd build
+          cmake .. -G"Unix Makefiles" \
+            -DCMAKE_TOOLCHAIN_FILE=../toolchain.cmake \
+            -DEXAMPLE=usbd_msc_new \
+            -Dusb_stack=new
+          cmake --build . --target flash -j"$(nproc)" 2>&1 | tail -80
+          echo "===== 产物 ====="
+          find . -name '*.bin' -o -name '*.json' | sort | head -40
+
+      - name: 上传固件
+        uses: actions/upload-artifact@v4
+        with:
+          name: bw21-sdreader
+          path: |
+            sdk/project/realtek_amebapro2_v0_example/GCC-RELEASE/build/firmware_ntz.bin
+            sdk/project/realtek_amebapro2_v0_example/GCC-RELEASE/build/flash_ntz.bin
+            sdk/project/realtek_amebapro2_v0_example/GCC-RELEASE/build/application/*.bin
+            sdk/project/realtek_amebapro2_v0_example/GCC-RELEASE/build/application/*.json
+          if-no-files-found: warn
+
+      - name: 上传烧录工具
+        uses: actions/upload-artifact@v4
+        with:
+          name: bw21-flash-tool
+          path: sdk/tools/image_tool/**
+          if-no-files-found: warn
+
+      - name: 上传例程原理参考（源码很小，方便以后改动）
+        uses: actions/upload-artifact@v4
+        with:
+          name: bw21-sdreader-src
+          path: |
+            sdk/component/example/usbd_msc_new/
+            sdk/component/usb/usb_stack/v1.0.0/device/msc/
+          if-no-files-found: warn
