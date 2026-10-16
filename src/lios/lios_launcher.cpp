@@ -352,6 +352,7 @@ static volatile int g_autotest_step = 0; // 自动测试走到第几步
 static volatile int g_tile_open_cnt = 0; // 「打开方块」成功执行了几次
 static volatile int g_app_exit_cnt = 0;  // 「退出应用」成功执行了几次
 static volatile bool g_autotest_wanted = false; // 自动测试是否被请求（/tmp/lios_autotest 存在）
+static volatile bool g_autotest_armed_done = false; // 定时器是否已经建过
 
 // HAL::lv_loop 每圈调一次（myHAL.cpp）——看门狗就看这个计数器
 void lios_ui_beat(void)
@@ -418,9 +419,13 @@ void lios_autotest_start(void)
 static void autotest_arm_timers(void)
 {
     static bool armed = false;
-    if (armed || !g_autotest_wanted)
+    if (armed)
+        return;
+    // 每次 arm 都重新确认一次标志文件（不依赖主线程那次 access 的时序）
+    if (access("/tmp/lios_autotest", F_OK) != 0 && !g_autotest_wanted)
         return;
     armed = true;
+    g_autotest_armed_done = true;
     LOCKLV();
     g_hb_timer = lv_timer_create(autotest_hb_cb, 500, NULL);
     lv_timer_t *st = lv_timer_create(autotest_step_cb, 3000, NULL);
@@ -846,6 +851,18 @@ void lios_launcher_poll(void)
 {
     if (!g_active)
         return;
+
+    // 自动测试：HAL 线程每圈顺手确认一次标志文件（这里调 lv_timer_create 时 UI 线程一定在跑，
+    // 定时器才会被触发；arm 内部有一次性保护，不会重复建）
+    if (!g_autotest_armed_done)
+    {
+        static int arm_check = 0;
+        if (++arm_check >= 20)
+        {
+            arm_check = 0;
+            autotest_arm_timers();
+        }
+    }
 
     // 有应用在跑：滚轮/确认/录像/菜单 全部转发给应用
     if (g_app_running)
