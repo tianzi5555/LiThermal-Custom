@@ -14,7 +14,7 @@
 #define KB_KEY_H 20
 #define KB_PITCH_X 29
 #define KB_PITCH_Y 22
-#define KB_INPUT_H 24
+#define KB_INPUT_H 28
 
 static const char *PAGE0[KB_N] = {
     "a", "b", "c", "d", "e", "f", "g", "h", "i", "j",
@@ -184,7 +184,9 @@ ui_kb_t *ui_kb_create(lv_obj_t *parent, lv_coord_t y, lv_coord_t w,
     lv_textarea_set_max_length(kb->ta, 512);
     lv_obj_set_style_text_font(kb->ta, &ui_font_cn16, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_bg_color(kb->ta, lv_color_hex(0x11181F), LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_text_color(kb->ta, lv_color_hex(0xE8EEF4), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_color(kb->ta, lv_color_hex(0xFFFFFF), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_border_width(kb->ta, 2, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_border_color(kb->ta, lv_color_hex(0x69C0FF), LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_clear_flag(kb->ta, LV_OBJ_FLAG_SCROLLABLE);
 
     kb->lbl_len = lv_label_create(kb->root);

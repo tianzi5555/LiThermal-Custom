@@ -128,11 +128,16 @@ static void sb_update(lv_timer_t *t)
     if (!sb_bar || !lv_obj_is_valid(sb_bar) || !sb_lbl || !lv_obj_is_valid(sb_lbl))
         return;
 
-    // 菜单展开时（右上角会弹出电池卡片）整条隐藏
+    // 菜单展开时（右上角会弹出电池卡片）整条隐藏；其余时候显示并抬到最前面
     if (current_mode == MODE_MAINMENU)
+    {
         lv_obj_add_flag(sb_bar, LV_OBJ_FLAG_HIDDEN);
+    }
     else
+    {
         lv_obj_clear_flag(sb_bar, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_move_foreground(sb_bar);
+    }
 
     int cpu = read_cpu_percent();
     int mem = read_mem_percent();
@@ -157,7 +162,8 @@ void ui_statusbar_create(void)
     if (sb_bar && lv_obj_is_valid(sb_bar))
         return;
 
-    sb_bar = lv_obj_create(lv_scr_act());
+    // 放到 lv_layer_sys：这是最上层，摄像头画面、相册、设置页都能看到它
+    sb_bar = lv_obj_create(lv_layer_sys());
     lv_obj_set_size(sb_bar, lv_disp_get_hor_res(NULL), SB_H);
     lv_obj_set_pos(sb_bar, 0, 0);
     lv_obj_clear_flag(sb_bar, LV_OBJ_FLAG_SCROLLABLE);
