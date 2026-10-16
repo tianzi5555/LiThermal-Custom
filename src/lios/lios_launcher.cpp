@@ -389,17 +389,26 @@ void lios_autotest_start(void)
     g_autotest_wanted = true;
 }
 
-// 由看门狗线程 / HAL 线程在 UI 线程跑起来之后调用（一次性）
+// 由看门狗线程 / HAL 线程在 UI 线程跑起来之后调用（用互斥锁保证只做一次；
+// 两个线程都会来调，不加锁会重复建定时器 → 自动测试步骤被执行两次）
+static pthread_mutex_t g_autotest_lock = PTHREAD_MUTEX_INITIALIZER;
 static void autotest_arm_timers(void)
 {
-    static bool armed = false;
-    if (armed)
+    pthread_mutex_lock(&g_autotest_lock);
+    if (g_autotest_armed_done)
+    {
+        pthread_mutex_unlock(&g_autotest_lock);
         return;
+    }
     // 每次 arm 都重新确认一次标志文件（不依赖主线程那次 access 的时序）
     if (access("/tmp/lios_autotest", F_OK) != 0 && !g_autotest_wanted)
+    {
+        pthread_mutex_unlock(&g_autotest_lock);
         return;
-    armed = true;
+    }
     g_autotest_armed_done = true;
+    pthread_mutex_unlock(&g_autotest_lock);
+
     LOCKLV();
     lv_timer_create(autotest_step_cb, 3000, NULL);
     UNLOCKLV();
