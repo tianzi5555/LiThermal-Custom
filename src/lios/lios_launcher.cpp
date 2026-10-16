@@ -345,35 +345,33 @@ static void tile_activate(int idx)
 // 默认关闭：只有 /tmp/lios_autotest 存在 + 启动参数带 --debug-lios 才会跑。
 
 static lv_timer_t *g_hb_timer = NULL;
-static int g_hb_seq = 0;
-static int g_autotest_step = 0;
+static volatile int g_hb_seq = 0;      // 心跳次数（由定时器回调加）
+static volatile int g_autotest_step = 0; // 自动测试走到第几步
+static volatile int g_tile_open_cnt = 0; // 「打开方块」成功执行了几次
+static volatile int g_app_exit_cnt = 0;  // 「退出应用」成功执行了几次
 
-// 心跳回调本身就是在 lv_timer_handler 里跑的（已持锁），所以这里不能 LOCKLV
+// 注意：**定时器回调里不要调 lios_log**（实测在这台机器上定时器回调里写文件会卡住，
+// 心跳计数其实一直在涨，但日志就是写不出来）。所以回调只改内存里的计数，
+// 由看门狗线程（普通线程，写日志正常）负责把计数打到日志里。
 static void autotest_hb_cb(lv_timer_t *t)
 {
     (void)t;
     g_hb_seq++;
-    // 只在头几次打日志，避免刷屏
-    if (g_hb_seq <= 3 || g_hb_seq % 40 == 0)
-        lios_log("autotest 心跳 #%d（UI 线程活着；app_running=%d）", g_hb_seq, g_app_running ? 1 : 0);
 }
 
 // 同样在 lv_timer_handler（已持锁）里跑：只能调 *_locked 版本
 static void autotest_step_cb(lv_timer_t *t)
 {
     g_autotest_step++;
-    lios_log("autotest 步骤 %d 开始（回调确实进来了）", g_autotest_step);
     switch (g_autotest_step)
     {
     case 1: // 打开第一个内置方块（「文件管理」）
-        lios_log("autotest: 打开方块 idx=1");
         tile_activate_locked(1);
-        lios_log("autotest: 方块 idx=1 已打开");
+        g_tile_open_cnt++;
         break;
     case 2:
-        lios_log("autotest: 退出应用回桌面");
         app_exit_locked();
-        lios_log("autotest: 已回桌面");
+        g_app_exit_cnt++;
         break;
     case 3:
         lv_timer_del(t);
@@ -382,7 +380,6 @@ static void autotest_step_cb(lv_timer_t *t)
             lv_timer_del(g_hb_timer);
             g_hb_timer = NULL;
         }
-        lios_log("autotest: 全部完成");
         break;
     default:
         break;
@@ -430,8 +427,9 @@ static void *lios_watchdog_thread(void *)
         usleep(500 * 1000);
         if (g_wd_stop)
             break;
-        if (++tick % 4 == 0) // 每 2 秒记一次实际心跳值，用来判断 UI 线程到底在不在跑
-            lios_log("看门狗: beat=%u（%s）", (unsigned)g_beat, (g_beat == last) ? "没动" : "在涨");
+        if (++tick % 2 == 0) // 每 1 秒记一次：心跳值 + 自动测试进度（看门狗是普通线程，写日志正常）
+            lios_log("看门狗: beat=%u step=%d tile_open=%d app_exit=%d",
+                     (unsigned)g_beat, g_autotest_step, g_tile_open_cnt, g_app_exit_cnt);
         if (g_beat == last)
         {
             stuck++;
