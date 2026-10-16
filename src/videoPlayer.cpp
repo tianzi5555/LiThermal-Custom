@@ -1,4 +1,5 @@
 #include "videoPlayer.h"
+#include "perfProbe.h" // 临时性能探针（诊断用，可删）
 #include <sys/time.h>
 #include <semaphore.h>
 #include <string.h>
@@ -255,6 +256,7 @@ static void build_index_tables(int cropX, int cropY, int cropW, int cropH, int s
 
 static void process_frame_to_buffers(AVFrame *frame)
 {
+    PERF_SCOPE(PERF_PROC); // 临时探针：裁剪 + 缩放（CPU 逐像素）全程
     int srcW = frame->width;
     int srcH = frame->height;
     int srcStride = frame->linesize[0];
@@ -477,7 +479,10 @@ void *thread_refresh_image(void *)
             break;
         case STATE_PLAYING:
         {
+            /* --- perf probe: codec_getFrame 全程（RTSP 收包 + 解码） --- */
+            uint32_t perf_gf_t0 = perf_probe_now_us();
             auto frame = codec_getFrame();
+            perf_probe_add(PERF_GETFRAME, perf_probe_now_us() - perf_gf_t0);
             if (frame == NULL)
             {
                 printf("empty\n");

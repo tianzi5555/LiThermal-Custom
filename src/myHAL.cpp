@@ -1,5 +1,6 @@
 #include "myHAL.h"
 #include "uiTrace.h"
+#include "perfProbe.h" // 临时性能探针（诊断用，可删）
 #include "lv_drivers/display/sunxifb.h"
 #include <unistd.h>
 #include <time.h>
@@ -160,6 +161,9 @@ void *thread_hal_func(void *)
 {
     while (1)
     {
+        /* --- perf probe: HAL 线程每轮耗时（不含尾部 usleep） --- */
+        uint32_t perf_hal_t0 = perf_probe_now_us();
+
         refresh_poweroff_key();
         if (global_poweroff_request == true)
         {
@@ -243,6 +247,7 @@ void *thread_hal_func(void *)
         }
         refresh_menu_key();
         battery_card_check();
+        perf_probe_add(PERF_HAL, perf_probe_now_us() - perf_hal_t0);
         usleep(25000);
     }
 }
@@ -300,9 +305,12 @@ void HAL::lv_loop()
 {
     while (true)
     {
+        /* --- perf probe: lv_task_handler 全程（含抢 lv_mutex，能看出被别的线程顶住多久） --- */
+        uint32_t perf_lv_t0 = perf_probe_now_us();
         LOCKLV();
         lv_task_handler();
         UNLOCKLV();
+        perf_probe_add(PERF_LV, perf_probe_now_us() - perf_lv_t0);
         usleep(5000);
     }
 }

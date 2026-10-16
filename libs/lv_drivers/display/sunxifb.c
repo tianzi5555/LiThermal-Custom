@@ -13,10 +13,20 @@
 #include <unistd.h>
 #include <stddef.h>
 #include <stdio.h>
+#include <string.h>
 #include <fcntl.h>
+#include <errno.h>
 #include <sys/mman.h>
 #include <sys/ioctl.h>
 #include <linux/fb.h>
+
+/* 临时性能探针（诊断用，可整体删除）：相对路径是因为 lv_drivers 是独立 CMake 目标，
+   拿不到主工程的 include/ 头文件搜索路径。 */
+#include "../../../include/perfProbe.h"
+
+#ifndef FBIO_WAITFORVSYNC
+#define FBIO_WAITFORVSYNC _IOW('F', 0x20, __u32)
+#endif
 
 #ifdef LV_USE_SUNXIFB_DEBUG
 #include <sys/time.h>
@@ -84,6 +94,22 @@ struct sunxifb_info {
 static struct sunxifb_info sinfo;
 #endif /* USE_SUNXIFB_DOUBLE_BUFFER */
 
+/* ===== 临时性能探针：每秒探测一次 FBIO_WAITFORVSYNC 是否可用 / 实际等待多久，
+   并回读 yoffset 看 FBIOPAN_DISPLAY 到底有没有被驱动接受 =====
+   放在汇总线程里调用，最多阻塞 1 帧；不改动任何渲染路径行为。 */
+static void sunxifb_perf_1s_hook(void) {
+    uint32_t dummy = 0;
+    struct fb_var_screeninfo vi;
+    int r = ioctl(fbfd, FBIO_WAITFORVSYNC, &dummy);
+    perf_probe_gauge(PERF_G_VSYNC_RET, (unsigned int) r);
+    perf_probe_gauge(PERF_G_VSYNC_ERRNO, (unsigned int) errno);
+
+    memset(&vi, 0, sizeof(vi));
+    if (ioctl(fbfd, FBIOGET_VSCREENINFO, &vi) == 0) {
+        perf_probe_gauge(PERF_G_YOFFSET_READBACK, (unsigned int) vi.yoffset);
+    }
+}
+
 /**********************
  *      MACROS
  **********************/
@@ -143,6 +169,19 @@ void sunxifb_init(uint32_t rotated) {
     sinfo.dbuf_en = true;
     // Do not clear fb and pointer to back fb
     sinfo.fbnum = (uint32_t)(screensize / (finfo.line_length * vinfo.yres));
+
+    /* ===== 临时性能探针：运行期真实几何 + 到底走了哪条显示路径 ===== */
+    perf_probe_note("fb: smem_len=%ld line_length=%u xres=%u yres=%u "
+            "xres_virtual=%u yres_virtual=%u bpp=%u -> fbnum=%u (>=2 才可能双缓冲)",
+            (long) finfo.smem_len, (unsigned int) finfo.line_length, vinfo.xres,
+            vinfo.yres, vinfo.xres_virtual, vinfo.yres_virtual,
+            vinfo.bits_per_pixel, sinfo.fbnum);
+    if (sinfo.fbnum <= 1) {
+        perf_probe_note("fb: DB_ACTIVE=0 单缓冲直写可见 framebuffer："
+                "sunxifb.c:164 的 if(fbnum>1) 不成立 -> G2D/rotate buffer 全都不建，"
+                "sunxifb_flush 里 FBIOPAN_DISPLAY 永远不会被调用 (=撕裂根因)");
+    }
+
     if (sinfo.fbnum > 1) {
         printf("Turn on double buffering.\n");
 
@@ -153,6 +192,9 @@ void sunxifb_init(uint32_t rotated) {
             sinfo.fbindex = !sinfo.fbindex;
             fbp = sinfo.screenfbp[sinfo.fbindex];
         }
+        perf_probe_note("fb: DB_ACTIVE=1 双页 page0=%p page1=%p fbindex(写)=%u "
+                "yoffset=%u", (void*) sinfo.screenfbp[0],
+                (void*) sinfo.screenfbp[1], sinfo.fbindex, vinfo.yoffset);
 
 #ifdef USE_SUNXIFB_G2D
         printf("Turn on 2d hardware acceleration.\n");
@@ -202,12 +244,32 @@ void sunxifb_init(uint32_t rotated) {
             sinfo.rotatefbp_h = vinfo.yres;
             break;
         }
+        /* ===== 临时性能探针：G2D_ROTATE 路径下的真实渲染目标 ===== */
+        perf_probe_note("fb: G2D_ROTATE path ON rotated=%u(0=NONE) rotatefbp=%p phy=%p "
+                "rot_w=%u rot_h=%u fbp_line_length=%u -> LVGL 渲染进这唯一的 rotate "
+                "buffer，每帧再 G2D blit 到 FB[fbindex] 然后 FBIOPAN_DISPLAY",
+                (unsigned int) sinfo.rotated, (void*) sinfo.rotatefbp,
+                (void*) sinfo.rotatefbp_phy, sinfo.rotatefbp_w, sinfo.rotatefbp_h,
+                fbp_line_length);
 #endif /* USE_SUNXIFB_G2D_ROTATE */
 #endif /* USE_SUNXIFB_G2D */
     }
 #else
     memset(fbp, 0, screensize);
 #endif /* USE_SUNXIFB_DOUBLE_BUFFER */
+
+    /* ===== 临时性能探针：一次性 vsync 支持性探测（最多等 1 帧，不改渲染行为） ===== */
+    {
+        uint32_t dummy = 0;
+        uint32_t t0 = perf_probe_now_us();
+        int r = ioctl(fbfd, FBIO_WAITFORVSYNC, &dummy);
+        int e = errno;
+        perf_probe_note("vsync_probe(init): FBIO_WAITFORVSYNC ret=%d errno=%d wait_us=%u",
+                r, e, perf_probe_now_us() - t0);
+        perf_probe_gauge(PERF_G_VSYNC_RET, (unsigned int) r);
+        perf_probe_gauge(PERF_G_VSYNC_ERRNO, (unsigned int) e);
+    }
+    perf_probe_set_1s_hook(sunxifb_perf_1s_hook);
 }
 
 void sunxifb_exit(void) {
@@ -239,10 +301,13 @@ void sunxifb_exit(void) {
  */
 void sunxifb_flush(lv_disp_drv_t *drv, const lv_area_t *area,
         lv_color_t *color_p) {
+    /* ===== 临时性能探针：flush 全程 ===== */
+    uint32_t perf_flush_t0 = perf_probe_now_us();
     if (fbp == NULL || area->x2 < 0 || area->y2 < 0
             || area->x1 > (int32_t) fbp_w - 1
             || area->y1 > (int32_t) fbp_h - 1) {
         lv_disp_flush_ready(drv);
+        perf_probe_add(PERF_FLUSH, perf_probe_now_us() - perf_flush_t0);
         return;
     }
 
@@ -342,6 +407,9 @@ void sunxifb_flush(lv_disp_drv_t *drv, const lv_area_t *area,
 
 #ifdef USE_SUNXIFB_DOUBLE_BUFFER
     if (sinfo.fbnum > 1 && sinfo.dbuf_en && lv_disp_flush_is_last(drv)) {
+        /* ===== 临时性能探针：真正上屏那一段（cache sync + G2D blit + pan） ===== */
+        uint32_t perf_pan_t0 = perf_probe_now_us();
+        perf_probe_count(PERF_C_FLUSH_LAST, 1u);
 #ifdef USE_SUNXIFB_CACHE
         uintptr_t args[2];
         args[0] = (uintptr_t) sinfo.screenfbp[sinfo.fbindex];
@@ -359,12 +427,14 @@ void sunxifb_flush(lv_disp_drv_t *drv, const lv_area_t *area,
                 sinfo.rotatefbp_h, finfo.smem_start, vinfo.xres_virtual,
                 vinfo.yres_virtual, 0, sinfo.fbindex * vinfo.yres, vinfo.xres,
                 vinfo.yres, sinfo.rotated);
+        perf_probe_count(PERF_C_G2D_BLIT, 1u);
 #endif /* USE_SUNXIFB_G2D_ROTATE */
 
         vinfo.yoffset = sinfo.fbindex * vinfo.yres;
         if (ioctl(fbfd, FBIOPAN_DISPLAY, &vinfo) < 0) {
             perror("Error: FBIOPAN_DISPLAY fail");
         }
+        perf_probe_count(PERF_C_PAN, 1u);
 
 #if defined(USE_SUNXIFB_G2D) && !defined(USE_SUNXIFB_G2D_ROTATE)
         sunxifb_g2d_blit_to_fb(finfo.smem_start, vinfo.xres_virtual,
@@ -381,6 +451,7 @@ void sunxifb_flush(lv_disp_drv_t *drv, const lv_area_t *area,
 #ifndef USE_SUNXIFB_G2D_ROTATE
         fbp = sinfo.screenfbp[sinfo.fbindex];
 #endif /* USE_SUNXIFB_G2D_ROTATE */
+        perf_probe_add(PERF_FLUSH_PAN, perf_probe_now_us() - perf_pan_t0);
 
 #ifdef LV_USE_SUNXIFB_DEBUG
         static struct timeval new, old;
@@ -420,6 +491,7 @@ void sunxifb_flush(lv_disp_drv_t *drv, const lv_area_t *area,
 #endif /* USE_SUNXIFB_DOUBLE_BUFFER */
 
     lv_disp_flush_ready(drv);
+    perf_probe_add(PERF_FLUSH, perf_probe_now_us() - perf_flush_t0);
 }
 
 void sunxifb_get_sizes(uint32_t *width, uint32_t *height) {

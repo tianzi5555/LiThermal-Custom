@@ -1,5 +1,6 @@
 #include "httplib.h"
 #include "cameraUtils.h"
+#include "perfProbe.h" // 临时性能探针（诊断用，可删）
 #include <mutex>
 #include <string.h>
 
@@ -101,6 +102,7 @@ void CameraUtils::getModuleStatus()
 
 void CameraUtils::getTemperature()
 {
+    PERF_SCOPE(PERF_GETTEMP); // 临时探针：含等 cli_mutex + HTTP + JSON 解析
     std::lock_guard<std::mutex> cli_lock(cli_mutex);
     auto res = cli.Get("/ISAPI/Thermal/channels/1/thermometry/1/rulesTemperatureInfo?format=json");
     if (res && res->status == 200)
@@ -292,6 +294,7 @@ static std::vector<multipart_part_t> split_multipart_ro(const std::string &body,
 
 float CameraUtils::readJpegWithExtra(const char *save_filename, int result_x, int result_y)
 {
+    PERF_SCOPE(PERF_SNAP); // 临时探针：100KB 大快照全程（含 multipart 切分）
     // 注意：这里用 cli_thermal/cli_thermal_mutex（大请求专用），不再占用 getTemperature() 的 cli_mutex，
     // 所以这条 100KB 的请求不会再把 25Hz 的温度轮询顶住。
     std::lock_guard<std::mutex> cli_lock(cli_thermal_mutex);

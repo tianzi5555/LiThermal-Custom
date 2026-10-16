@@ -1,6 +1,7 @@
 #include "my_main.h"
 #include "uiTrace.h"
 #include "statusBar.h"
+#include "perfProbe.h" // 临时性能探针（诊断用，可删）
 #include <signal.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -62,8 +63,15 @@ void *thread_app_func(void *)
     widget_graph_check_visibility();
     ui_zoom_pip_check_visibility();
     UNLOCKLV();
+    uint32_t perf_prev_loop_start = 0;
     while (1)
     {
+        /* --- perf probe: 主循环每轮耗时（不含尾部 usleep） + 轮与轮的真实间隔 --- */
+        uint32_t perf_loop_t0 = perf_probe_now_us();
+        if (perf_prev_loop_start != 0)
+            perf_probe_add(PERF_LOOP_PERIOD, perf_loop_t0 - perf_prev_loop_start);
+        perf_prev_loop_start = perf_loop_t0;
+
         if (last_color_palette != globalSettings.colorPalette)
         {
             last_color_palette = globalSettings.colorPalette;
@@ -80,6 +88,7 @@ void *thread_app_func(void *)
         widget_graph_check_visibility();
         ui_zoom_pip_check_visibility();
         UNLOCKLV();
+        perf_probe_add(PERF_LOOP, perf_probe_now_us() - perf_loop_t0);
         usleep(40000);
     }
     return NULL;
@@ -107,6 +116,9 @@ void *thread_center_temp_func(void *)
         usleep(100000);
     while (1)
     {
+        /* --- perf probe: 中心温度线程每轮周期（含固定 sleep，用来确认周期真的对） --- */
+        uint32_t perf_center_t0 = perf_probe_now_us();
+
         struct timeval begin_tv;
         gettimeofday(&begin_tv, NULL);
 
@@ -130,12 +142,14 @@ void *thread_center_temp_func(void *)
             used_ms = 0;
         if (used_ms < CENTER_TEMP_FETCH_MS)
             usleep((useconds_t)(CENTER_TEMP_FETCH_MS - used_ms) * 1000);
+        perf_probe_add(PERF_CENTER, perf_probe_now_us() - perf_center_t0);
     }
     return NULL;
 }
 
 int main()
 {
+    perf_probe_init(); // 临时性能探针：/tmp/perf.log，每 1 秒汇总一行（诊断用，可删）
     install_crash_handler();
     ui_trace_reset();
     sleep(1); // Why?
