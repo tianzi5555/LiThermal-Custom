@@ -199,6 +199,14 @@ void *thread_temp_poll_func(void *)
 
 int main(int argc, char **argv)
 {
+    // 只读自检：`LiThermal --selftest-pw` —— 把 lios.conf 的解析结果和三条密码判定写进
+    // /tmp/lios.log（只输出长度/校验和，不建界面、不改任何文件），排查密码分流用。
+    for (int i = 1; i < argc; i++)
+    {
+        if (argv[i] != NULL && strcmp(argv[i], "--selftest-pw") == 0)
+            return lios_selftest_pw();
+    }
+
     perf_probe_init(); // 临时性能探针：/tmp/perf.log，每 1 秒汇总一行（诊断用，可删）
     install_crash_handler();
     ui_trace_reset();

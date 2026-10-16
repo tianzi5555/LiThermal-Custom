@@ -55,8 +55,14 @@ extern "C"
     /// @return true = 需要走登录流程
     bool lios_user_prepare(int argc, char **argv);
 
+    /// @brief 只读自检：把 lios.conf 的解析结果和三条密码判定写进 /tmp/lios.log
+    /// （用 `LiThermal --selftest-pw` 调，不看界面、不改任何文件；只输出长度/校验和）
+    /// @return 恒为 0
+    int lios_selftest_pw(void);
+
     /// @brief 跑一次登录流程（自己跑 lv_timer_handler，此时 UI 线程还没起来）
-    /// @return LIOS_ENTER_CAMERA（相机密码 / 三步退出 / 任何异常兜底）或 LIOS_ENTER_LIOS
+    /// 只有输对密码才能离开登录界面（camera 密码→相机，lios 密码→LiOS）
+    /// @return LIOS_ENTER_CAMERA（相机密码 / 配置缺失兜底）或 LIOS_ENTER_LIOS
     lios_mode_t lios_login_show_and_run(void);
 
 #ifdef __cplusplus

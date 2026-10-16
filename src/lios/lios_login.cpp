@@ -58,14 +58,7 @@ bool lios_user_prepare(int argc, char **argv)
 #define LOGIN_BTN_W 84
 #define LOGIN_BTN_H 34
 #define LOGIN_BTN_GAP 4
-#define LOGIN_NEED_CONFIRM 6 // 连错这么多次就额外提示「三步退出」
-
-// 退出登录的手势（第二期加的防误触）：菜单键 → 录像键 → 波轮确认键
-// 中间任何一步按错、或者两步之间超过 LOGIN_EXIT_TIMEOUT_MS，就作废回待机
-#define LOGIN_EXIT_TIMEOUT_MS 4000
-#define LOGIN_EXIT_STEP0 0 // 待机
-#define LOGIN_EXIT_STEP1 1 // 已按菜单键
-#define LOGIN_EXIT_STEP2 2 // 已按菜单键 + 录像键
+#define LOGIN_NEED_CONFIRM 6 // 连错这么多次就多给一句提示
 
 // 数字键（顺序 = LVGL 组的遍历顺序，也是滚轮顺序；正好 12 个键占满 4×3）
 static const char *LOGIN_KEYS[12] = {
@@ -74,30 +67,15 @@ static const char *LOGIN_KEYS[12] = {
     "7", "8", "9",
     "退回", "0", "确定"};
 
-static lv_obj_t *scr_login = NULL;  // 登录界面根容器（全屏，放在 lv_layer_sys）
-static lv_obj_t *login_ta = NULL;   // 密码输入框
-static lv_obj_t *login_msg = NULL;  // 底部提示行（错误/重输提示）
-static lv_obj_t *login_gest = NULL; // 常驻的手势提示小字
+static lv_obj_t *scr_login = NULL; // 登录界面根容器（全屏，放在 lv_layer_sys）
+static lv_obj_t *login_ta = NULL;  // 密码输入框
+static lv_obj_t *login_msg = NULL; // 底部提示行（错误/重输提示）
 static lv_obj_t *login_keys[12] = {NULL};
 static int login_idx = 0; // 当前选中的键
 static int login_err_cnt = 0;
-static int login_exit_step = LOGIN_EXIT_STEP0;
-static uint32_t login_exit_t0 = 0;                  // 上一步按下的时刻
-static volatile int login_result = -1;              // -1 继续等 / LIOS_ENTER_CAMERA / LIOS_ENTER_LIOS
+static volatile int login_result = -1; // -1 继续等 / LIOS_ENTER_CAMERA / LIOS_ENTER_LIOS
 
 static const char *LOGIN_HELP = "输完密码，滚轮移到「确定」按下";
-// 注意：这里只用 ASCII 的 > 和普通空格，避免 · / → 这类符号缺字形显示成方框
-static const char *LOGIN_GESTURE = "退出登录：菜单 > 录像 > 确认";
-static const char *LOGIN_TAIL = "（直接进相机）";
-// 手势作废时的一行提示（按错/超时都用这个）
-static const char *LOGIN_RESET_MSG = "已取消，重来：菜单>录像>确认";
-
-static uint32_t login_now_ms(void)
-{
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint32_t)(ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
-}
 
 static void login_refresh_field(void)
 {
@@ -107,28 +85,11 @@ static void login_refresh_field(void)
     int n = (t != NULL) ? (int)strlen(t) : 0;
     if (login_msg != NULL && lv_obj_is_valid(login_msg))
     {
-        if (login_exit_step == LOGIN_EXIT_STEP1)
-            lv_label_set_text(login_msg, "退出登录 1/3 已按菜单键，请按 录像键");
-        else if (login_exit_step == LOGIN_EXIT_STEP2)
-            lv_label_set_text(login_msg, "退出登录 2/3 已按录像键，请按 确认键");
-        else if (login_err_cnt >= LOGIN_NEED_CONFIRM)
-            lv_label_set_text(login_msg, "密码错误。退出请按 菜单>录像>确认");
-        else if (n > 0)
+        if (n > 0)
             lv_label_set_text(login_msg, LOGIN_HELP);
         else
             lv_label_set_text(login_msg, "请输入密码");
     }
-}
-
-// 手势作废（超时或按错）→ 回待机并给一行提示
-static void login_exit_reset(const char *why)
-{
-    if (login_exit_step != LOGIN_EXIT_STEP0)
-        lios_log("退出登录手势作废（%s）", why ? why : "");
-    login_exit_step = LOGIN_EXIT_STEP0;
-    login_exit_t0 = 0;
-    if (login_msg != NULL && lv_obj_is_valid(login_msg) && why != NULL)
-        lv_label_set_text(login_msg, why);
 }
 
 // 滚轮换键：自己改焦点 + 自己刷样式（不依赖 LVGL 的 FOCUSED 事件）
@@ -182,20 +143,23 @@ static void login_key_cb(lv_event_t *e)
     if (strcmp(LOGIN_KEYS[idx], "确定") == 0)
     {
         const char *t = lv_textarea_get_text(login_ta);
+        // 提交时记一条长度日志（不打印明文），配合 lios_config.c 里的分支日志定位分流问题
+        lios_log("点确定：输入 len=%d", (t != NULL) ? (int)strlen(t) : -1);
         int r = lios_login_check(t);
         if (r >= 0)
         {
             login_result = r;
+            lios_log("登录分流确定: %s", (r == LIOS_ENTER_LIOS) ? "lios -> LiOS 桌面" : "camera -> 相机");
             return;
         }
-        // 密码错误：清空重输，绝不崩溃、不退出
+        // 密码错误：清空重输，绝不崩溃、不退出（也绝不因此放进相机）
         login_err_cnt++;
         lios_log("密码错误第 %d 次", login_err_cnt);
         lv_textarea_set_text(login_ta, "");
         if (login_msg != NULL && lv_obj_is_valid(login_msg))
         {
             if (login_err_cnt >= LOGIN_NEED_CONFIRM)
-                lv_label_set_text(login_msg, "密码错误。退出请按 菜单>录像>确认");
+                lv_label_set_text(login_msg, "密码还是不对，请重输");
             else
                 lv_label_set_text(login_msg, "密码错误，请重输");
         }
@@ -247,9 +211,6 @@ static void login_cleanup(void)
     scr_login = NULL;
     login_ta = NULL;
     login_msg = NULL;
-    login_gest = NULL;
-    login_exit_step = LOGIN_EXIT_STEP0;
-    login_exit_t0 = 0;
     for (int i = 0; i < 12; i++)
         login_keys[i] = NULL;
     login_idx = 0;
@@ -300,34 +261,25 @@ lios_mode_t lios_login_show_and_run(void)
     login_msg = lv_label_create(scr_login);
     lv_obj_set_style_text_font(login_msg, &ui_font_cn16, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_text_color(login_msg, lv_color_hex(0x9AA7B4), LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_pos(login_msg, 8, 218);
+    lv_obj_set_pos(login_msg, 8, 216);
     lv_label_set_text(login_msg, "请输入密码");
 
-    // 常驻的手势提示小字（用户得想得起来怎么退出登录）
-    login_gest = lv_label_create(scr_login);
-    lv_obj_set_style_text_font(login_gest, &ui_font_cn12, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_text_color(login_gest, lv_color_hex(0x5E6A76), LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_pos(login_gest, 8, 234);
-    lv_label_set_text_fmt(login_gest, "%s%s", LOGIN_GESTURE, LOGIN_TAIL);
-
     login_idx = 0;
-    login_exit_step = LOGIN_EXIT_STEP0;
-    login_exit_t0 = 0;
     login_apply_nav();
     UNLOCKLV();
 
     lios_log("密码界面已显示");
+    lios_log("登录界面: 只有输对密码才能离开（菜单键不做任何事）");
 
     login_result = -1;
     // 登录期间 UI 线程还没起来，这里自己跑 LVGL 主循环（先睡一会儿让屏幕刷出来）
     usleep(50000);
     while (login_result < 0)
     {
-        uint32_t now = login_now_ms();
         bool menu_ev, rec_ev, enter_ev;
 
         LOCKLV();
-        lv_timer_handler();
+        lv_timer_handler(); // 键盘输入 + 编码器（滚轮移动 / 按下确认）都在这里处理
         menu_ev = HAL::key_press_event[1];
         if (menu_ev)
             HAL::key_press_event[1] = false;
@@ -338,53 +290,20 @@ lios_mode_t lios_login_show_and_run(void)
         if (enter_ev)
             HAL::key_press_event[3] = false;
 
-        // 手势超时 → 作废（给一行提示）
-        if (login_exit_step != LOGIN_EXIT_STEP0 && login_exit_t0 != 0 &&
-            (now - login_exit_t0) > LOGIN_EXIT_TIMEOUT_MS)
+        // 菜单键/录像键在登录界面**不做任何事**：用户明确要求没有绕过密码的入口。
+        // 按了只给一行提示，绝不离开登录界面（只有输对密码才走）。
+        if ((menu_ev || rec_ev) && login_msg != NULL && lv_obj_is_valid(login_msg))
         {
-            login_exit_reset(LOGIN_RESET_MSG);
-        }
-
-        // 三步退出：菜单键 → 录像键 → 波轮确认键
-        if (menu_ev)
-        {
-            if (login_exit_step == LOGIN_EXIT_STEP0)
-            {
-                login_exit_step = LOGIN_EXIT_STEP1;
-                login_exit_t0 = now;
-            }
+            const char *t = (login_ta != NULL && lv_obj_is_valid(login_ta))
+                                ? lv_textarea_get_text(login_ta)
+                                : NULL;
+            if (t != NULL && t[0] != '\0')
+                lv_label_set_text(login_msg, LOGIN_HELP);
             else
-            {
-                login_exit_reset(LOGIN_RESET_MSG);
-            }
+                lv_label_set_text(login_msg, "请输入密码");
         }
-        else if (rec_ev)
-        {
-            if (login_exit_step == LOGIN_EXIT_STEP1)
-            {
-                login_exit_step = LOGIN_EXIT_STEP2;
-                login_exit_t0 = now;
-            }
-            else
-            {
-                login_exit_reset(LOGIN_RESET_MSG);
-            }
-        }
-        else if (enter_ev)
-        {
-            if (login_exit_step == LOGIN_EXIT_STEP2)
-            {
-                login_result = LIOS_ENTER_CAMERA;
-                lios_log("三步退出登录完成（菜单→录像→确认）→ 直接进相机");
-            }
-            else if (login_exit_step != LOGIN_EXIT_STEP0)
-            {
-                login_exit_reset(LOGIN_RESET_MSG);
-            }
-        }
-        if (login_exit_step != LOGIN_EXIT_STEP0)
-            login_refresh_field();
         UNLOCKLV();
+
         usleep(10000);
     }
 
