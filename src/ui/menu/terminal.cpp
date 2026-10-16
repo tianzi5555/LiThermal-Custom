@@ -169,6 +169,7 @@ void menu_terminal_show(void)
     if (term_open)
         return;
 
+    ui_trace("terminal: show 开始");
     card_term.create(lv_layer_top(), 0, TERM_CARD_Y, TERM_CARD_W, TERM_CARD_H, LV_ALIGN_TOP_MID);
     lv_obj_t *root = card_term.obj;
     lv_obj_clear_flag(root, LV_OBJ_FLAG_SCROLLABLE);
@@ -226,10 +227,12 @@ void menu_terminal_show(void)
 
     kb = ui_kb_create(root, 96, TERM_CARD_W - 8, "执行", kb_action, NULL);
 
+    ui_trace("terminal: 控件建完，开始动画");
     card_term.show(CARD_ANIM_FLY_UP);
     term_open = true;
     if (kb)
         ui_kb_focus(kb);
+    ui_trace("terminal: show 完成");
 }
 
 void menu_terminal_hide(void)

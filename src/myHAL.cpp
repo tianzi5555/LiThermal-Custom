@@ -215,7 +215,10 @@ void *thread_hal_func(void *)
                     LOCKLV();
                     menu_system_hide();
                     UNLOCKLV();
+                    // 修：建 LVGL 页面必须在锁内（否则和渲染线程抢内存 -> 崩溃/BSOD）
+                    LOCKLV();
                     menu_hidden_gallery_show();
+                    UNLOCKLV();
                 }
                 else if (system_noiseclear_option_focused())
                 {
@@ -224,7 +227,10 @@ void *thread_hal_func(void *)
                     LOCKLV();
                     menu_system_hide();
                     UNLOCKLV();
+                    // 修：建 LVGL 页面必须在锁内（否则崩溃 -> BSOD 彩蛋）
+                    LOCKLV();
                     menu_terminal_show();
+                    UNLOCKLV();
                     current_mode = MODE_TERMINAL;
                 }
             }
