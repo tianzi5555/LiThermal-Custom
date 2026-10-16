@@ -223,8 +223,8 @@ int main(int argc, char **argv)
     // ---- LiOS 第一期：开机密码 + 两种顶层模式 ----
     // 不带 --login 时 lios_user_prepare 返回 false，下面这段整段跳过，
     // 行为与改动前**完全一致**（绝不影响现有部署）。
-    bool enter_lios_mode = false;
-    if (lios_user_prepare(argc, argv))
+    bool enter_lios_mode = lios_debug_lios_requested(argc, argv); // --debug-lios 直接进桌面（调试）
+    if (!enter_lios_mode && lios_user_prepare(argc, argv))
     {
         current_mode = MODE_LOGIN; // 让滚轮/按键交给密码界面（见 myHAL.cpp: encoder_read）
         lios_mode_t m = lios_login_show_and_run();
@@ -249,6 +249,11 @@ int main(int argc, char **argv)
     }
 
     void *result;
-    pthread_join(thread_ui, &result);
+    // LiOS 启动路径下 UI 线程是 launcher 线程建的，等它建出来再 join。
+    // （直接 pthread_join(thread_ui) 有 join 到 0 的风险，那是未定义行为、实测会崩）
+    while (!lios_camera_ready())
+        usleep(20000);
+    if (thread_ui != 0)
+        pthread_join(thread_ui, &result);
     return 0;
 }

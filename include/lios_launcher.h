@@ -23,8 +23,16 @@ extern "C"
     /// @brief 切到 LiOS 模式（起 launcher 线程；已经在 LiOS 里则什么都不做）
     void lios_enter(void);
 
+    /// @brief 调试入口：`LiThermal --debug-lios` 直接进桌面（跳过登录），返回是否命中
+    bool lios_debug_lios_requested(int argc, char **argv);
+
     /// @brief 当前是不是 LiOS 桌面在显示（= 相机线程应该待机）
     bool lios_mode_active(void);
+
+    /// @brief main 用：UI 线程（HAL::lv_loop）是不是已经建出来了。
+    /// LiOS 启动路径下 UI 线程是 launcher 线程建的，main 不能直接
+    /// pthread_join(thread_ui)（有 join 到 0 的风险），要先等这个为真。
+    bool lios_camera_ready(void);
 
     /// @brief 当前有没有应用占着屏幕（有的话滚轮/确认要转发给应用，桌面不吞）
     bool lios_launcher_app_active(void);

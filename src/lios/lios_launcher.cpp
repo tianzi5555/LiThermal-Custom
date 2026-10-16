@@ -91,6 +91,21 @@ static bool g_app_running = false;     // 有没有应用占着屏幕
 static int g_app_index = -1;           // 正在运行的应用下标
 static bool g_enter_requested = false; // 被请求切进 LiOS
 static volatile bool g_app_exit_request = false; // 应用自己要求退出（插件用）
+static volatile bool g_camera_ready = false;     // enter_camera 是否已经把 UI 线程建出来了
+static bool g_debug_force_lios = false;          // --debug-lios 直接进桌面（调试用，跳过密码/手势）
+
+// 调试入口：`LiThermal --debug-lios` 直接进 LiOS 桌面（不用输密码）。
+// 只给开发/排查用，正常启动（thermalcamera.sh 用 --login）不受影响。
+bool lios_debug_lios_requested(int argc, char **argv)
+{
+    g_debug_force_lios = false;
+    for (int i = 1; i < argc; i++)
+        if (argv[i] != NULL && strcmp(argv[i], "--debug-lios") == 0)
+            g_debug_force_lios = true;
+    if (g_debug_force_lios)
+        lios_log("--debug-lios：跳过登录，直接进 LiOS 桌面（调试用）");
+    return g_debug_force_lios;
+}
 
 static lv_obj_t *scr_lios = NULL;      // 桌面根容器（lv_layer_sys，全屏不透明）
 static lv_obj_t *grid_cont = NULL;     // 方块网格容器
@@ -473,7 +488,9 @@ void lios_launcher_screen(void)
     lios_log("桌面应用数：%d", g_app_cnt);
 
     LOCKLV();
+    lios_log("桌面: 开始建界面");
     scr_lios = lv_obj_create(lv_layer_sys());
+    lios_log("桌面: 根容器 %p", (void *)scr_lios);
     lv_obj_set_size(scr_lios, 320, 240);
     lv_obj_set_pos(scr_lios, 0, 0);
     lv_obj_clear_flag(scr_lios, LV_OBJ_FLAG_SCROLLABLE);
@@ -496,8 +513,10 @@ void lios_launcher_screen(void)
     lv_label_set_text(hint_lbl, "滚轮选择  按下进入  菜单键回相机");
 
     build_grid();
+    lios_log("桌面: 网格已建好");
     lv_obj_move_foreground(scr_lios); // 盖住相机界面（状态条在右上角仍可见）
     UNLOCKLV();
+    lios_log("桌面: 界面完成，开始等待按键");
 
     g_active = true;
 
@@ -588,10 +607,16 @@ void lios_enter(void)
     pthread_detach(th);
     lios_log("lios_enter：launcher 线程已起");
 }
-
 bool lios_mode_active(void)
 {
     return g_active;
+}
+
+// main 用：等 UI 线程真的建出来（LiOS 启动路径下是 launcher 线程建的，
+// 直接 pthread_join(thread_ui) 有可能 join 到 0，那是未定义行为）
+bool lios_camera_ready(void)
+{
+    return g_camera_ready;
 }
 
 bool lios_launcher_app_active(void)
@@ -677,16 +702,27 @@ void enter_camera(void)
     lios_log("enter_camera：开始启动相机");
     printf("Loop begin\n");
     waitboot_scr_load(lv_scr_act());
+    lios_log("enter_camera：waitboot 完成");
     widget_graph_create();
     ui_crosshairs_create();
     ui_center_display_create();
     ui_statusbar_create(); // 顶部半透明状态条（CPU/内存）
+    lios_log("enter_camera：界面部件建完");
     if (thread_ui == 0)
-        pthread_create(&thread_ui, NULL, thread_ui_func, NULL);
+    {
+        // 注意：LiOS 启动路径下 enter_camera 是在 launcher 线程里跑的，
+        // 而 main 最后会 pthread_join(thread_ui) —— 一定要等线程真的建出来
+        // 再把 thread_ui 交出去，否则 main 会 join(0)（未定义行为，实测会崩）。
+        if (pthread_create(&thread_ui, NULL, thread_ui_func, NULL) == 0)
+            lios_log("enter_camera：UI 线程已起");
+        else
+            lios_log("enter_camera：UI 线程创建失败！");
+    }
     cameraUtils.initHTTPClient();
     pthread_create(&thread_app, NULL, thread_app_func, NULL);
     pthread_create(&thread_temp_poll, NULL, thread_temp_poll_func, NULL); // 温度轮询独立线程
     pthread_create(&thread_center_temp, NULL, thread_center_temp_func, NULL);
     current_mode = MODE_MAINPAGE;
+    g_camera_ready = true; // 通知 main 可以 join UI 线程了
     lios_log("enter_camera：相机线程已启动");
 }
