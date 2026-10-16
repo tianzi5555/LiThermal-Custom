@@ -23,6 +23,7 @@
 /* 临时性能探针（诊断用，可整体删除）：相对路径是因为 lv_drivers 是独立 CMake 目标，
    拿不到主工程的 include/ 头文件搜索路径。 */
 #include "../../../include/perfProbe.h"
+#include "../../../include/dispVsync.h"
 
 #ifndef FBIO_WAITFORVSYNC
 #define FBIO_WAITFORVSYNC _IOW('F', 0x20, __u32)
@@ -108,6 +109,15 @@ static void sunxifb_perf_1s_hook(void) {
     if (ioctl(fbfd, FBIOGET_VSCREENINFO, &vi) == 0) {
         perf_probe_gauge(PERF_G_YOFFSET_READBACK, (unsigned int) vi.yoffset);
     }
+}
+
+/* ===== 临时修复（撕裂）：只有一块可见 framebuffer 时才需要自己对齐帧头 ===== */
+static int sunxifb_is_single_buffer(void) {
+#ifdef USE_SUNXIFB_DOUBLE_BUFFER
+    return (sinfo.fbnum <= 1) ? 1 : 0;
+#else
+    return 1;
+#endif
 }
 
 /**********************
@@ -269,7 +279,9 @@ void sunxifb_init(uint32_t rotated) {
         perf_probe_gauge(PERF_G_VSYNC_RET, (unsigned int) r);
         perf_probe_gauge(PERF_G_VSYNC_ERRNO, (unsigned int) e);
     }
+    disp_vsync_init(); /* 临时修复（撕裂）：拿「帧头」用的 /dev/disp vsync 事件，失败即降级 */
     perf_probe_set_1s_hook(sunxifb_perf_1s_hook);
+    perf_probe_add_1s_hook(disp_vsync_drain); /* 每秒抽干 netlink，防止 VSYNC 消息塞满内核缓冲 */
 }
 
 void sunxifb_exit(void) {
@@ -323,6 +335,28 @@ void sunxifb_flush(lv_disp_drv_t *drv, const lv_area_t *area,
     long int location = 0;
     long int byte_location = 0;
     unsigned char bit_location = 0;
+
+    /* ===== 临时修复（撕裂）：单缓冲 + 整屏刷新时，先把写入对齐到「帧头」 =====
+       本机 fb0 只有 1 页（yres_virtual=240、disp_reserve=307200），没有第二页可以 pan；
+       面板 117Hz（8.5ms/帧），而整屏 320x240x4=300KB 的 CPU 拷贝实测只要 ~0.4ms
+       （比光栅快 ~20 倍）。所以在帧头开始从上往下顺序写，写指针全程跑在光栅前面，
+       就不会再出现「上半屏新、下半屏旧」的撕裂线。
+       /dev/disp 的 vsync 事件拿不到时这里什么都不做（失败即降级，绝不会卡住 UI）。 */
+    if ((act_x2 - act_x1 + 1) >= 300 && (act_y2 - act_y1 + 1) >= 200
+            && sunxifb_is_single_buffer() && disp_vsync_is_available()) {
+        static uint32_t s_last_vsync_us = 0;
+        uint32_t now_us = perf_probe_now_us();
+        if (now_us - s_last_vsync_us >= 4000) { /* 一次整屏刷新只等一次，且至少间隔 4ms */
+            uint32_t wait_t0 = perf_probe_now_us();
+            int w_us = disp_vsync_wait_us(20); /* 硬上限 20ms：等不到就放弃，绝不长锁 lv_mutex */
+            if (w_us >= 0) {
+                perf_probe_add(PERF_VSYNC_WAIT, perf_probe_now_us() - wait_t0);
+                s_last_vsync_us = perf_probe_now_us();
+            } else {
+                s_last_vsync_us = now_us;
+            }
+        }
+    }
 
     /*32 or 24 bit per pixel*/
     if (vinfo.bits_per_pixel == 32 || vinfo.bits_per_pixel == 24) {

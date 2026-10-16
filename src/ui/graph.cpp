@@ -254,13 +254,16 @@ static void showGraph()
 
 static uint16_t getGraphData(int id)
 {
+    // 温度读数由独立轮询线程写，加锁取一份快照（图表定时器跑在 LVGL 线程上）
+    temperature_point_t tr;
+    cameraUtils.copyTemperatureResult(tr);
     switch (id)
     {
     case GRAPH_DATA_SOURCE_MAX:
-        return cameraUtils.lastResult.maxTemperature * 100;
+        return tr.maxTemperature * 100;
         break;
     case GRAPH_DATA_SOURCE_MIN:
-        return cameraUtils.lastResult.minTemperature * 100;
+        return tr.minTemperature * 100;
         break;
     default:
         break;

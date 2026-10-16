@@ -77,10 +77,10 @@ void *thread_app_func(void *)
             last_color_palette = globalSettings.colorPalette;
             cameraUtils.setColorPalette(globalSettings.colorPalette);
         }
-        if (current_mode == MODE_MAINPAGE || current_mode == MODE_CAMERA_SETTINGS)
-        {
-            cameraUtils.getTemperature();
-        }
+        /* 注意：getTemperature() 已经不在这里同步调用了（搬到 thread_temp_poll_func）。
+           原来每轮同步等一次 HTTP，实测 getTemp_avg≈97ms / max≈262ms，把这条本该 25Hz 的
+           UI 更新循环压到 ~7.4Hz —— 这就是「卡顿」的主因。现在主循环只读缓存值，
+           UI 更新回到 ~24Hz；温度数值新鲜度由轮询线程保证（不低于原来）。 */
         LOCKLV();
         ui_crosshairs_updatePos();
         ui_center_display_update();
@@ -147,6 +147,35 @@ void *thread_center_temp_func(void *)
     return NULL;
 }
 
+/// @brief 温度轮询线程：把 getTemperature() 的 HTTP 阻塞从主循环里搬出来
+///
+/// 原来主循环每轮同步等一次 HTTP，实测 getTemp_avg≈97ms / max≈262ms，把本该 25Hz 的
+/// UI 更新循环压到 ~7.4Hz —— 用户说的「卡顿」主因。
+/// 现在 HTTP 只在这条线程里跑（周期 120ms：比原来的实际周期 ~136ms 还快一点，
+/// 所以温度数值新鲜度不降），主循环只读 copyTemperatureResult() 的缓存值，
+/// UI 更新率回到 ~24Hz。LVGL 对象的更新仍然全部在主循环持 lv_mutex 的路径里做。
+#define TEMP_POLL_MS 120
+pthread_t thread_temp_poll;
+void *thread_temp_poll_func(void *)
+{
+    while (cameraUtils.connected == false)
+        usleep(100000);
+    while (1)
+    {
+        uint32_t t0 = perf_probe_now_us();
+        if (current_mode == MODE_MAINPAGE || current_mode == MODE_CAMERA_SETTINGS)
+        {
+            cameraUtils.getTemperature();
+        }
+        // 和中心温度线程一样：把请求耗时从周期里扣掉，保证是固定周期
+        uint32_t used_ms = (perf_probe_now_us() - t0) / 1000;
+        if (used_ms < TEMP_POLL_MS)
+            usleep((useconds_t)(TEMP_POLL_MS - used_ms) * 1000);
+        perf_probe_add(PERF_TEMP_PERIOD, perf_probe_now_us() - t0);
+    }
+    return NULL;
+}
+
 int main()
 {
     perf_probe_init(); // 临时性能探针：/tmp/perf.log，每 1 秒汇总一行（诊断用，可删）
@@ -170,6 +199,7 @@ int main()
     pthread_create(&thread_ui, NULL, thread_ui_func, NULL);
     cameraUtils.initHTTPClient();
     pthread_create(&thread_app, NULL, thread_app_func, NULL);
+    pthread_create(&thread_temp_poll, NULL, thread_temp_poll_func, NULL); // 温度轮询独立线程
     pthread_create(&thread_center_temp, NULL, thread_center_temp_func, NULL);
     void *result;
     pthread_join(thread_ui, &result);

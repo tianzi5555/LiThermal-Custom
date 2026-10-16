@@ -34,6 +34,8 @@ enum perf_slot_e
     PERF_FLUSH_PAN,   /* sunxifb_flush() 里 cache sync + G2D blit + FBIOPAN_DISPLAY 段 */
     PERF_HAL,         /* thread_hal_func 每轮「干活」耗时 */
     PERF_CENTER,      /* 中心温度线程每轮（含固定 500ms 周期 sleep，用来确认周期真的对） */
+    PERF_VSYNC_WAIT,  /* 整屏 flush 之前等 /dev/disp vsync（帧头）的耗时 */
+    PERF_TEMP_PERIOD, /* 温度轮询线程每轮真实周期（getTemperature 已搬出主循环） */
     PERF_SLOT_MAX
 };
 
@@ -43,15 +45,18 @@ enum perf_counter_e
     PERF_C_FLUSH_LAST = 0, /* lv_disp_flush_is_last() 为真的次数 = 真正「上屏」的帧数 */
     PERF_C_PAN,            /* FBIOPAN_DISPLAY 调用次数（=0 就说明双缓冲根本没生效） */
     PERF_C_G2D_BLIT,       /* sunxifb_g2d_blit_to_fb 调用次数 */
+    PERF_C_GF_SPIKE,       /* codec_getFrame 耗时 >50ms 的次数（视频卡顿计数） */
+    PERF_C_GF_NEAR_SNAP,   /* 上面这些尖峰里落在大快照结束 400ms 内的次数（相关性证据） */
     PERF_C_MAX
 };
 
 /* ---------------- 一次性数值（最后一次的值原样输出） ---------------- */
 enum perf_gauge_e
 {
-    PERF_G_VSYNC_RET = 0,   /* FBIO_WAITFORVSYNC 的返回值 */
+    PERF_G_VSYNC_RET = 0,   /* FBIO_WAITFORVSYNC 的返回值（本内核是空实现，恒 0 且不等待） */
     PERF_G_VSYNC_ERRNO,     /* 失败时的 errno */
-    PERF_G_YOFFSET_READBACK,/* 回读 FBIOGET_VSCREENINFO 的 yoffset（看 pan 到底有没有被驱动接受） */
+    PERF_G_YOFFSET_READBACK,/* 回读 FBIOGET_VSCREENINFO 的 yoffset（看 pan 有没有被驱动接受） */
+    PERF_G_DISPVSYNC_OK,    /* 1 = /dev/disp 的 vsync 事件确实能等到帧头 */
     PERF_G_MAX
 };
 
@@ -73,8 +78,9 @@ void perf_probe_count(int counter, unsigned int delta);
 /* 设置一次性数值 */
 void perf_probe_gauge(int gauge, unsigned int value);
 
-/* 注册「每秒调用一次」的钩子（汇总线程调用它，用来探测 vsync 等） */
+/* 注册「每秒调用一次」的钩子（汇总线程调用它）。最多 4 个，各自独立。 */
 void perf_probe_set_1s_hook(void (*fn)(void));
+void perf_probe_add_1s_hook(void (*fn)(void));
 
 #ifdef __cplusplus
 } /* extern "C" */

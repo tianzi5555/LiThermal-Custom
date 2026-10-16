@@ -482,7 +482,17 @@ void *thread_refresh_image(void *)
             /* --- perf probe: codec_getFrame 全程（RTSP 收包 + 解码） --- */
             uint32_t perf_gf_t0 = perf_probe_now_us();
             auto frame = codec_getFrame();
-            perf_probe_add(PERF_GETFRAME, perf_probe_now_us() - perf_gf_t0);
+            uint32_t perf_gf_us = perf_probe_now_us() - perf_gf_t0;
+            perf_probe_add(PERF_GETFRAME, perf_gf_us);
+            /* 相关性统计：>50ms 的取帧尖峰里，有多少落在大快照结束后的 400ms 内？
+               用来判定「2 次/秒的 100KB 大快照是不是把 RTSP 视频拖卡的元凶」。 */
+            if (perf_gf_us > 50000)
+            {
+                perf_probe_count(PERF_C_GF_SPIKE, 1u);
+                uint32_t snap_end = g_last_snap_end_us;
+                if (snap_end != 0 && (perf_probe_now_us() - snap_end) < 400000)
+                    perf_probe_count(PERF_C_GF_NEAR_SNAP, 1u);
+            }
             if (frame == NULL)
             {
                 printf("empty\n");

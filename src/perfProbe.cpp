@@ -37,6 +37,9 @@ static unsigned int s_counters[PERF_C_MAX];
 static unsigned int s_gauges[PERF_G_MAX];
 
 static void (*s_1s_hook)(void) = NULL;
+#define PERF_MAX_1S_HOOKS 4
+static void (*s_1s_hooks[PERF_MAX_1S_HOOKS])(void) = {NULL, NULL, NULL, NULL};
+static int s_1s_hook_num = 0;
 static FILE *s_log = NULL;
 static pthread_mutex_t s_log_mutex = PTHREAD_MUTEX_INITIALIZER;
 static uint32_t s_start_us = 0;
@@ -111,6 +114,13 @@ void perf_probe_set_1s_hook(void (*fn)(void))
     s_1s_hook = fn;
 }
 
+void perf_probe_add_1s_hook(void (*fn)(void))
+{
+    if (fn == NULL || s_1s_hook_num >= PERF_MAX_1S_HOOKS)
+        return;
+    s_1s_hooks[s_1s_hook_num++] = fn;
+}
+
 static void *perf_reporter(void *arg)
 {
     struct timespec ts;
@@ -148,6 +158,14 @@ static void *perf_reporter(void *arg)
             s_1s_hook();
             hook_us = perf_probe_now_us() - t0;
         }
+        {
+            int h;
+            for (h = 0; h < s_1s_hook_num; h++)
+            {
+                if (s_1s_hooks[h] != NULL)
+                    s_1s_hooks[h]();
+            }
+        }
 
         /* 第 1 行：各段耗时（ms），格式按需求固定，后面追加 max */
         n = snprintf(line, sizeof(line),
@@ -155,7 +173,7 @@ static void *perf_reporter(void *arg)
                      "snap_avg=%.1f snap_max=%.1f getframe_avg=%.1f getframe_max=%.1f "
                      "proc_avg=%.2f proc_max=%.2f lv_avg=%.2f lv_max=%.2f "
                      "flush_avg=%.2f flush_max=%.2f flushPan_avg=%.2f flushPan_max=%.2f "
-                     "period_avg=%.1f hal_avg=%.2f",
+                     "vsyncW_avg=%.2f vsyncW_max=%.2f period_avg=%.1f tempPeriod_avg=%.1f hal_avg=%.2f",
                      (double)(perf_probe_now_us() - s_start_us) / 1000000.0,
                      avg[PERF_LOOP], (double)mx[PERF_LOOP] / 1000.0,
                      avg[PERF_GETTEMP], (double)mx[PERF_GETTEMP] / 1000.0,
@@ -165,7 +183,8 @@ static void *perf_reporter(void *arg)
                      avg[PERF_LV], (double)mx[PERF_LV] / 1000.0,
                      avg[PERF_FLUSH], (double)mx[PERF_FLUSH] / 1000.0,
                      avg[PERF_FLUSH_PAN], (double)mx[PERF_FLUSH_PAN] / 1000.0,
-                     avg[PERF_LOOP_PERIOD], avg[PERF_HAL]);
+                     avg[PERF_VSYNC_WAIT], (double)mx[PERF_VSYNC_WAIT] / 1000.0,
+                     avg[PERF_LOOP_PERIOD], avg[PERF_TEMP_PERIOD], avg[PERF_HAL]);
         if (n > 0)
             perf_write_line(line);
 
@@ -173,11 +192,12 @@ static void *perf_reporter(void *arg)
         n = snprintf(line, sizeof(line),
                      "perf_n: loop=%u getTemp=%u snap=%u getframe=%u proc=%u lv=%u flush=%u flush_last=%u "
                      "pan=%u g2d_blit=%u hal=%u center=%u vsync_ret=%u vsync_errno=%u vsync_hook_us=%u "
-                     "yoffset_rb=%u",
+                     "yoffset_rb=%u vsyncW=%u gf_spike=%u gf_near_snap=%u dispvsync_ok=%u",
                      cnt[PERF_LOOP], cnt[PERF_GETTEMP], cnt[PERF_SNAP], cnt[PERF_GETFRAME], cnt[PERF_PROC],
                      cnt[PERF_LV], cnt[PERF_FLUSH], ev[PERF_C_FLUSH_LAST], ev[PERF_C_PAN], ev[PERF_C_G2D_BLIT],
                      cnt[PERF_HAL], cnt[PERF_CENTER], s_gauges[PERF_G_VSYNC_RET], s_gauges[PERF_G_VSYNC_ERRNO],
-                     hook_us, s_gauges[PERF_G_YOFFSET_READBACK]);
+                     hook_us, s_gauges[PERF_G_YOFFSET_READBACK], cnt[PERF_VSYNC_WAIT],
+                     ev[PERF_C_GF_SPIKE], ev[PERF_C_GF_NEAR_SNAP], s_gauges[PERF_G_DISPVSYNC_OK]);
         if (n > 0)
             perf_write_line(line);
     }

@@ -100,6 +100,15 @@ void CameraUtils::getModuleStatus()
     moduleOk = (cpu >= 0);
 }
 
+// 加锁取一份快照：UI/图表线程用这个读 lastResult，避免和温度轮询线程抢（32 位 ARM 上
+// double 不是原子写，直接读有可能读到半新半旧的值 —— 显示会「错乱」）。
+void CameraUtils::copyTemperatureResult(temperature_point_t &out)
+{
+    pthread_mutex_lock(&lastResultMutex);
+    out = lastResult;
+    pthread_mutex_unlock(&lastResultMutex);
+}
+
 void CameraUtils::getTemperature()
 {
     PERF_SCOPE(PERF_GETTEMP); // 临时探针：含等 cli_mutex + HTTP + JSON 解析
@@ -141,15 +150,20 @@ void CameraUtils::getTemperature()
         cJSON *positionY = cJSON_GetObjectItem(MaxTemperaturePoint, "positionY");
         cJSON *positionX2 = cJSON_GetObjectItem(MinTemperaturePoint, "positionX");
         cJSON *positionY2 = cJSON_GetObjectItem(MinTemperaturePoint, "positionY");
-        lastResult.maxTemperature = maxTemperature->valuedouble;
-        lastResult.minTemperature = minTemperature->valuedouble;
-        lastResult.averageTemperature = averageTemperature->valuedouble;
-        lastResult.MaxTemperaturePoint.positionX = positionX->valuedouble;
-        lastResult.MaxTemperaturePoint.positionY = positionY->valuedouble;
-        lastResult.MinTemperaturePoint.positionX = positionX2->valuedouble;
-        lastResult.MinTemperaturePoint.positionY = positionY2->valuedouble;
-        lastResult.isFreezedata = cJSON_GetObjectItem(pack, "isFreezedata")->valueint;
+        // 先在本地拼好，再整体发布（持锁时间极短；UI 侧读到的永远是一份完整一致的结果）
+        temperature_point_t r;
+        r.maxTemperature = maxTemperature->valuedouble;
+        r.minTemperature = minTemperature->valuedouble;
+        r.averageTemperature = averageTemperature->valuedouble;
+        r.MaxTemperaturePoint.positionX = positionX->valuedouble;
+        r.MaxTemperaturePoint.positionY = positionY->valuedouble;
+        r.MinTemperaturePoint.positionX = positionX2->valuedouble;
+        r.MinTemperaturePoint.positionY = positionY2->valuedouble;
+        r.isFreezedata = cJSON_GetObjectItem(pack, "isFreezedata")->valueint;
         cJSON_Delete(root);
+        pthread_mutex_lock(&lastResultMutex);
+        lastResult = r;
+        pthread_mutex_unlock(&lastResultMutex);
     }
     else
     {
@@ -292,6 +306,9 @@ static std::vector<multipart_part_t> split_multipart_ro(const std::string &body,
     return parts;
 }
 
+// 探针用：大快照最后一次返回的时刻（见 cameraUtils.h 的声明）
+volatile uint32_t g_last_snap_end_us = 0;
+
 float CameraUtils::readJpegWithExtra(const char *save_filename, int result_x, int result_y)
 {
     PERF_SCOPE(PERF_SNAP); // 临时探针：100KB 大快照全程（含 multipart 切分）
@@ -299,6 +316,7 @@ float CameraUtils::readJpegWithExtra(const char *save_filename, int result_x, in
     // 所以这条 100KB 的请求不会再把 25Hz 的温度轮询顶住。
     std::lock_guard<std::mutex> cli_lock(cli_thermal_mutex);
     auto res = cli_thermal.Get("/ISAPI/Thermal/channels/1/thermometry/jpegPicWithAppendData?format=json");
+    g_last_snap_end_us = perf_probe_now_us(); // 探针：模组刚被这张大图占用完的时刻
     if (res && res->status == 200)
     {
         // Parse the response headers to get the boundary string

@@ -89,6 +89,9 @@ void ui_crosshairs_updatePos()
 {
     float x, y;
     char buffer[16];
+    // 温度读数现在由独立轮询线程写，这里加锁取一份一致的快照（最大值/最小值/坐标必须配套）
+    temperature_point_t tr;
+    cameraUtils.copyTemperatureResult(tr);
     if (hidden_by_view == true)
     {
         if (current_mode == MODE_MAINPAGE || current_mode == MODE_CAMERA_SETTINGS)
@@ -109,15 +112,15 @@ void ui_crosshairs_updatePos()
     }
     if (globalSettings.enableMaxValueDisplay)
     {
-        if (map_full_to_screen(cameraUtils.lastResult.MaxTemperaturePoint.positionX,
-                               cameraUtils.lastResult.MaxTemperaturePoint.positionY, &x, &y))
+        if (map_full_to_screen(tr.MaxTemperaturePoint.positionX,
+                               tr.MaxTemperaturePoint.positionY, &x, &y))
         {
             lv_obj_clear_flag(crosshairs_max_obj, LV_OBJ_FLAG_HIDDEN);
             lv_obj_move_foreground(crosshairs_max_obj);
             x -= 7;
             y -= 7;
             crosshair_anim_move(crosshairs_max_obj, x, y);
-            sprintf(buffer, "%.1f", cameraUtils.lastResult.maxTemperature);
+            sprintf(buffer, "%.1f", tr.maxTemperature);
             lv_label_set_text(crosshairs_label_max, buffer);
         }
         else
@@ -127,15 +130,15 @@ void ui_crosshairs_updatePos()
     }
     if (globalSettings.enableMinValueDisplay)
     {
-        if (map_full_to_screen(cameraUtils.lastResult.MinTemperaturePoint.positionX,
-                               cameraUtils.lastResult.MinTemperaturePoint.positionY, &x, &y))
+        if (map_full_to_screen(tr.MinTemperaturePoint.positionX,
+                               tr.MinTemperaturePoint.positionY, &x, &y))
         {
             lv_obj_clear_flag(crosshairs_min_obj, LV_OBJ_FLAG_HIDDEN);
             lv_obj_move_foreground(crosshairs_min_obj);
             x -= 7;
             y -= 7;
             crosshair_anim_move(crosshairs_min_obj, x, y);
-            sprintf(buffer, "%.1f", cameraUtils.lastResult.minTemperature);
+            sprintf(buffer, "%.1f", tr.minTemperature);
             lv_label_set_text(crosshairs_label_min, buffer);
         }
         else
