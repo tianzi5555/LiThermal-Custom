@@ -568,12 +568,18 @@ static void app_exit_locked(void)
     {
         // 先把焦点挪回一个还活着的方块，再删应用容器，
         // 避免 LVGL 的 group 里留下指向已删对象的焦点
+        lios_log("退出应用: 步骤1 挪焦点（tile0=%p valid=%d）", (void *)tile_objs[0],
+                 (tile_objs[0] && lv_obj_is_valid(tile_objs[0])) ? 1 : 0);
         if (tile_objs[0] != NULL && lv_obj_is_valid(tile_objs[0]))
             lv_group_focus_obj(tile_objs[0]);
+        lios_log("退出应用: 步骤2 删容器 %p", (void *)app_cont);
         lv_obj_del(app_cont);
+        lios_log("退出应用: 步骤3 容器已删");
     }
     app_cont = NULL;
+    lios_log("退出应用: 步骤4 打开输入");
     lios_indev_enable_after_app();
+    lios_log("退出应用: 步骤5 输入已打开");
 
     // 插件用一次卸一次，释放内存（内置的不需要）
     if (a != NULL && a->source == LIOS_SRC_PLUGIN && a->handle != NULL)
