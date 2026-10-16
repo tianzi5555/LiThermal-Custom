@@ -72,16 +72,6 @@ void *thread_app_func(void *)
         {
             cameraUtils.getTemperature();
         }
-        // 每 3 秒问一次热成像模组自己的状态（HTTP 不能太频繁，也不能在 LVGL 线程里做）
-        {
-            static time_t last_module_poll = 0;
-            time_t now_s = time(NULL);
-            if (now_s - last_module_poll >= 3)
-            {
-                last_module_poll = now_s;
-                cameraUtils.getModuleStatus();
-            }
-        }
         LOCKLV();
         ui_crosshairs_updatePos();
         ui_center_display_update();
