@@ -113,6 +113,19 @@ static lv_obj_t *tile_objs[LIOS_APP_MAX] = {NULL};
 static lv_obj_t *app_cont = NULL;      // 应用的全屏容器
 static lv_obj_t *hint_lbl = NULL;      // 底部提示行
 
+// 应用占屏时把编码器输入整个关掉：这样 LVGL 的 group 焦点不会被滚轮改到别处
+// （内置占位页自己不处理按键，转发也是空转），退出应用时再打开。
+// lv_indev_enable(NULL, ...) 的语义就是「所有输入设备」，正好用。
+static void lios_indev_disable_for_app(void)
+{
+    lv_indev_enable(NULL, false);
+}
+
+static void lios_indev_enable_after_app(void)
+{
+    lv_indev_enable(NULL, true);
+}
+
 // ---------------------------------------------------------------- 小工具
 
 static bool ends_with(const char *s, const char *suffix)
@@ -314,6 +327,143 @@ static void set_hint(const char *s)
         lv_label_set_text(hint_lbl, s ? s : "");
 }
 
+// 打开下标 idx 的方块（tile_click_cb 和自动测试都走这一条路径）
+// 注意：**调用时不能已经持有 lv_mutex**（内部会 LOCKLV）
+static void tile_activate_locked(int idx);
+static void app_exit_locked(void);
+static void tile_activate(int idx)
+{
+    LOCKLV();
+    tile_activate_locked(idx);
+    UNLOCKLV();
+}
+
+// ---------------------------------------------------------------- 自动测试（--debug-lios + /tmp/lios_autotest）
+//
+// 目的：不用人按，自己跑「进桌面 -> 打开方块 -> 心跳」，
+// 每 500ms 打一条心跳来证明 UI 线程是否还活着（用来区分「死锁卡死」和「崩溃」）。
+// 默认关闭：只有 /tmp/lios_autotest 存在 + 启动参数带 --debug-lios 才会跑。
+
+static lv_timer_t *g_hb_timer = NULL;
+static int g_hb_seq = 0;
+static int g_autotest_step = 0;
+
+// 心跳回调本身就是在 lv_timer_handler 里跑的（已持锁），所以这里不能 LOCKLV
+static void autotest_hb_cb(lv_timer_t *t)
+{
+    (void)t;
+    lios_log("autotest 心跳 #%d（UI 线程还活着；app_running=%d）",
+             ++g_hb_seq, g_app_running ? 1 : 0);
+}
+
+// 同样在 lv_timer_handler（已持锁）里跑：只能调 *_locked 版本
+static void autotest_step_cb(lv_timer_t *t)
+{
+    g_autotest_step++;
+    lios_log("autotest 步骤 %d 开始", g_autotest_step);
+    switch (g_autotest_step)
+    {
+    case 1: // 打开第一个内置方块（「文件管理」）
+        lios_log("autotest: 打开方块 idx=1");
+        tile_activate_locked(1);
+        lios_log("autotest: 方块 idx=1 已打开");
+        break;
+    case 2:
+        lios_log("autotest: 退出应用回桌面");
+        app_exit_locked();
+        lios_log("autotest: 已回桌面");
+        break;
+    case 3:
+        lv_timer_del(t);
+        if (g_hb_timer != NULL)
+        {
+            lv_timer_del(g_hb_timer);
+            g_hb_timer = NULL;
+        }
+        lios_log("autotest: 全部完成");
+        break;
+    default:
+        break;
+    }
+}
+
+void lios_autotest_start(void)
+{
+    if (access("/tmp/lios_autotest", F_OK) != 0)
+        return;
+    lios_log("=== autotest 已启用（/tmp/lios_autotest 存在）===");
+    LOCKLV();
+    g_hb_timer = lv_timer_create(autotest_hb_cb, 500, NULL);
+    lv_timer_create(autotest_step_cb, 3000, NULL);
+    UNLOCKLV();
+}
+
+// ---------------------------------------------------------------- 看门狗
+//
+// 这是个安全网：如果哪一步又把 UI 线程卡死了（屏幕不刷新、按键不响应），
+// 看门狗会写一条日志进 /tmp/lios.log，然后 _exit(99) 让 thermalcamera.sh
+// 的降级循环把相机重新拉起来（宁可重启，也不要留一块死屏 + 电源键无反应）。
+//
+// 心跳每 200ms 由 LVGL 定时器加一；看门狗每 500ms 看一次，
+// 连续 3 秒心跳没动就判定卡死。
+
+static volatile uint32_t g_beat = 0;
+static volatile bool g_wd_stop = false;
+static pthread_t g_wd_thread;
+
+static void heartbeat_cb(lv_timer_t *t)
+{
+    (void)t;
+    g_beat++;
+}
+
+static void *lios_watchdog_thread(void *)
+{
+    uint32_t last = g_beat;
+    int stuck = 0;
+    while (!g_wd_stop)
+    {
+        usleep(500 * 1000);
+        if (g_wd_stop)
+            break;
+        if (g_beat == last)
+        {
+            stuck++;
+            if (stuck >= 6) // 3 秒
+            {
+                lios_log("!!! 看门狗：UI 心跳停了 3 秒（疑似死锁），强制退出让脚本重启相机");
+                printf("[lios] watchdog timeout -> _exit(99)\n");
+                sync();
+                _exit(99);
+            }
+        }
+        else
+        {
+            stuck = 0;
+            last = g_beat;
+        }
+    }
+    return NULL;
+}
+
+void lios_watchdog_start(void)
+{
+    g_beat = 0;
+    g_wd_stop = false;
+    LOCKLV();
+    lv_timer_create(heartbeat_cb, 200, NULL);
+    UNLOCKLV();
+    if (pthread_create(&g_wd_thread, NULL, lios_watchdog_thread, NULL) == 0)
+    {
+        pthread_detach(g_wd_thread);
+        lios_log("看门狗已启动（心跳 200ms，卡死 3 秒即重启相机）");
+    }
+    else
+    {
+        lios_log("看门狗线程创建失败（不影响使用）");
+    }
+}
+
 static void tile_focus_cb(lv_event_t *e)
 {
     lv_obj_t *t = lv_event_get_target(e);
@@ -323,11 +473,19 @@ static void tile_focus_cb(lv_event_t *e)
 
 static void app_exit(void);
 
-// 确认进入某个方块
-static void tile_click_cb(lv_event_t *e)
+// 打开下标 idx 的方块：内部版（调用者必须已经持有 lv_mutex）
+//
+// 之所以拆成 locked / unlocked 两个版本：
+//   * tile_click_cb 是 LVGL 的**事件回调**，它是在 lv_timer_handler() 里被派发的，
+//     而 lv_timer_handler() 是在 HAL::lv_loop() 的 LOCKLV() 里面调的 ——
+//     也就是说**事件回调里 lv_mutex 已经被自己持有了**。
+//   * lv_mutex 是普通（非递归）互斥锁，在回调里再 LOCKLV() 会**自锁死**：
+//     UI 线程卡住 → 屏幕不再刷新、按键不再处理，连 HAL 线程的电源键处理
+//     （refresh_poweroff_key → lv_ui_poweroff 也要拿这把锁）也一起卡死，
+//     表现就是「点一下方块整机卡死、长按电源键无反应」。← 第二期实测就是这个 bug
+// 所以：LVGL 回调/定时器里一律只调 *_locked 版本，**绝不再 LOCKLV**。
+static void tile_activate_locked(int idx)
 {
-    lv_obj_t *t = lv_event_get_target(e);
-    int idx = (int)(intptr_t)lv_obj_get_user_data(t);
     if (idx < 0 || idx >= g_app_cnt)
         return;
 
@@ -344,8 +502,8 @@ static void tile_click_cb(lv_event_t *e)
     lios_log("桌面：进入应用 %s（source=%s）", g_apps[idx].id,
              g_apps[idx].source == LIOS_SRC_PLUGIN ? "plugin" : "builtin");
 
-    LOCKLV();
     app_cont = lv_obj_create(lv_layer_sys());
+    lios_log("桌面：应用容器 %p 已建", (void *)app_cont);
     lv_obj_set_size(app_cont, 320, 240);
     lv_obj_set_pos(app_cont, 0, 0);
     lv_obj_clear_flag(app_cont, LV_OBJ_FLAG_SCROLLABLE);
@@ -354,12 +512,13 @@ static void tile_click_cb(lv_event_t *e)
     lv_obj_set_style_pad_all(app_cont, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_bg_color(app_cont, lv_color_black(), LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_bg_opa(app_cont, LV_OPA_COVER, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_move_foreground(app_cont);
 
     if (g_apps[idx].source == LIOS_SRC_BUILTIN)
     {
         // 内置应用本期是占位页（下一期做文件管理器/设置/权限/后台）
         lv_obj_t *t1 = lv_label_create(app_cont);
-        lv_label_set_text_fmt(t1, "%s", g_apps[idx].name);
+        lv_label_set_text(t1, g_apps[idx].name);
         lv_obj_set_style_text_font(t1, &ui_font_cn16, LV_PART_MAIN | LV_STATE_DEFAULT);
         lv_obj_set_style_text_color(t1, lv_color_hex(0xE8EEF4), LV_PART_MAIN | LV_STATE_DEFAULT);
         lv_obj_align(t1, LV_ALIGN_TOP_MID, 0, 40);
@@ -373,23 +532,31 @@ static void tile_click_cb(lv_event_t *e)
         lv_obj_set_style_text_font(t3, &ui_font_cn12, LV_PART_MAIN | LV_STATE_DEFAULT);
         lv_obj_set_style_text_color(t3, lv_color_hex(0x7D8A97), LV_PART_MAIN | LV_STATE_DEFAULT);
         lv_obj_align(t3, LV_ALIGN_BOTTOM_MID, 0, -8);
+        lios_log("桌面：内置占位页建完");
     }
-    UNLOCKLV();
-
-    if (g_apps[idx].source == LIOS_SRC_PLUGIN)
+    else if (!plugin_create())
     {
-        if (!plugin_create())
-        {
-            // 插件当场挂了：不要停在黑屏，直接退回桌面
-            lios_log("插件 %s：create 调用失败，退回桌面", g_apps[idx].id);
-            app_exit();
-        }
+        // 插件当场挂了：不要停在黑屏，直接退回桌面
+        lios_log("插件 %s：create 调用失败，退回桌面", g_apps[idx].id);
+        app_exit_locked();
+        return;
     }
+
     set_hint("菜单键返回桌面");
+    lios_indev_disable_for_app(); // 应用占屏期间不让滚轮改桌面焦点
+    lios_log("桌面：进入应用完成");
 }
 
-// 退出当前应用（删容器；插件还要 destroy + 卸载）
-static void app_exit(void)
+// 确认进入某个方块（LVGL 事件回调：已在锁内，绝不能再 LOCKLV）
+static void tile_click_cb(lv_event_t *e)
+{
+    lv_obj_t *t = lv_event_get_target(e);
+    int idx = (int)(intptr_t)lv_obj_get_user_data(t);
+    tile_activate_locked(idx);
+}
+
+// 退出当前应用的**内部版**（调用者必须已经持有 lv_mutex：LVGL 回调/定时器里用）
+static void app_exit_locked(void)
 {
     if (!g_app_running)
         return;
@@ -402,24 +569,37 @@ static void app_exit(void)
         plugin_destroy();
     }
 
-    LOCKLV();
     if (app_cont != NULL && lv_obj_is_valid(app_cont))
+    {
+        // 先把焦点挪回一个还活着的方块，再删应用容器，
+        // 避免 LVGL 的 group 里留下指向已删对象的焦点
+        if (tile_objs[0] != NULL && lv_obj_is_valid(tile_objs[0]))
+            lv_group_focus_obj(tile_objs[0]);
         lv_obj_del(app_cont);
+    }
     app_cont = NULL;
-    UNLOCKLV();
+    lios_indev_enable_after_app();
 
     // 插件用一次卸一次，释放内存（内置的不需要）
     if (a != NULL && a->source == LIOS_SRC_PLUGIN && a->handle != NULL)
     {
         dlclose(a->handle);
-        a->handle = NULL; // 之后这个方块会显示「插件已卸载」，重启程序才能再加载
-        lios_log("插件 %s：dlclose 完成（重启后可再次加载）", a->id);
+        a->handle = NULL; // 下次再进需要重启程序重新加载
+        lios_log("插件 %s：dlclose 完成", a->id);
     }
 
     g_app_running = false;
     g_app_index = -1;
     set_hint("滚轮选择  按下进入  菜单键回相机");
     lios_log("桌面：已退出应用");
+}
+
+// 退出当前应用（外部调用版：自己加锁）
+static void app_exit(void)
+{
+    LOCKLV();
+    app_exit_locked();
+    UNLOCKLV();
 }
 
 static void build_grid(void)
@@ -548,6 +728,7 @@ void lios_launcher_screen(void)
     LOCKLV();
     if (tile_objs[0] != NULL && lv_obj_is_valid(tile_objs[0]))
         lv_group_focus_obj(tile_objs[0]); // 焦点别留在要删的对象上
+    lios_indev_enable_after_app();        // 防御：确保输入没被关掉
     if (scr_lios != NULL && lv_obj_is_valid(scr_lios))
         lv_obj_del(scr_lios);
     scr_lios = NULL;
@@ -714,9 +895,14 @@ void enter_camera(void)
         // 而 main 最后会 pthread_join(thread_ui) —— 一定要等线程真的建出来
         // 再把 thread_ui 交出去，否则 main 会 join(0)（未定义行为，实测会崩）。
         if (pthread_create(&thread_ui, NULL, thread_ui_func, NULL) == 0)
+        {
             lios_log("enter_camera：UI 线程已起");
+            lios_watchdog_start(); // UI 线程跑起来了，看门狗才有心跳可看
+        }
         else
+        {
             lios_log("enter_camera：UI 线程创建失败！");
+        }
     }
     cameraUtils.initHTTPClient();
     pthread_create(&thread_app, NULL, thread_app_func, NULL);

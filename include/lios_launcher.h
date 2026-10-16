@@ -26,6 +26,12 @@ extern "C"
     /// @brief 调试入口：`LiThermal --debug-lios` 直接进桌面（跳过登录），返回是否命中
     bool lios_debug_lios_requested(int argc, char **argv);
 
+    /// @brief 启动自动测试（只有 /tmp/lios_autotest 存在时才真的跑）
+    void lios_autotest_start(void);
+
+    /// @brief 启动看门狗：UI 心跳停 3 秒 → 写日志 + _exit(99)，让脚本重启相机
+    void lios_watchdog_start(void);
+
     /// @brief 当前是不是 LiOS 桌面在显示（= 相机线程应该待机）
     bool lios_mode_active(void);
 

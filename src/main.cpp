@@ -239,6 +239,9 @@ int main(int argc, char **argv)
     {
         // LiOS 模式：先让 launcher 线程去建桌面；桌面退出后它自己会调 enter_camera()
         current_mode = MODE_LIOS;
+        // 自动测试默认关闭，只有 /tmp/lios_autotest 存在才跑；
+        // 看门狗在 enter_camera() 起完 UI 线程后自动启动（那时心跳才有意义）
+        lios_autotest_start();
         lios_enter();
         printf("[lios] 已切到 LiOS 桌面（退出桌面后自动启动相机）\n");
     }
