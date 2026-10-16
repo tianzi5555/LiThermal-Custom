@@ -346,9 +346,16 @@ static void tile_activate(int idx)
 
 static lv_timer_t *g_hb_timer = NULL;
 static volatile int g_hb_seq = 0;      // 心跳次数（由定时器回调加）
+static volatile int g_probe_cnt = 0;   // 探测定时器（500ms）触发次数
 static volatile int g_autotest_step = 0; // 自动测试走到第几步
 static volatile int g_tile_open_cnt = 0; // 「打开方块」成功执行了几次
 static volatile int g_app_exit_cnt = 0;  // 「退出应用」成功执行了几次
+
+static void autotest_probe_cb(lv_timer_t *t)
+{
+    (void)t;
+    g_probe_cnt++;
+}
 
 // 注意：**定时器回调里不要调 lios_log**（实测在这台机器上定时器回调里写文件会卡住，
 // 心跳计数其实一直在涨，但日志就是写不出来）。所以回调只改内存里的计数，
@@ -394,8 +401,10 @@ void lios_autotest_start(void)
     LOCKLV();
     g_hb_timer = lv_timer_create(autotest_hb_cb, 500, NULL);
     lv_timer_t *st = lv_timer_create(autotest_step_cb, 3000, NULL);
+    lv_timer_t *pr = lv_timer_create(autotest_probe_cb, 500, NULL); // 插到表头（最先处理）
     UNLOCKLV();
-    lios_log("autotest: 定时器 hb=%p step=%p（NULL 表示创建失败）", (void *)g_hb_timer, (void *)st);
+    lios_log("autotest: 定时器 hb=%p step=%p probe=%p（NULL 表示创建失败）",
+             (void *)g_hb_timer, (void *)st, (void *)pr);
 }
 
 // ---------------------------------------------------------------- 看门狗
@@ -428,8 +437,8 @@ static void *lios_watchdog_thread(void *)
         if (g_wd_stop)
             break;
         if (++tick % 2 == 0) // 每 1 秒记一次：心跳值 + 自动测试进度（看门狗是普通线程，写日志正常）
-            lios_log("看门狗: beat=%u step=%d tile_open=%d app_exit=%d",
-                     (unsigned)g_beat, g_autotest_step, g_tile_open_cnt, g_app_exit_cnt);
+            lios_log("看门狗: beat=%u probe=%d step=%d tile_open=%d app_exit=%d",
+                     (unsigned)g_beat, g_probe_cnt, g_autotest_step, g_tile_open_cnt, g_app_exit_cnt);
         if (g_beat == last)
         {
             stuck++;
