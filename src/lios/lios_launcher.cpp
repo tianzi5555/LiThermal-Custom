@@ -350,6 +350,7 @@ static volatile int g_tile_open_cnt = 0; // 「打开方块」成功执行了几
 static volatile int g_app_exit_cnt = 0;  // 「退出应用」成功执行了几次
 static volatile bool g_autotest_wanted = false; // 自动测试是否被请求（/tmp/lios_autotest 存在）
 static volatile bool g_autotest_armed_done = false; // 定时器是否已经建过
+static volatile bool g_autotest_active = false;     // 自动测试是否正在驱动（由桌面等待循环执行）
 
 // HAL::lv_loop 每圈调一次（myHAL.cpp）——看门狗就看这个计数器
 void lios_ui_beat(void)
@@ -357,26 +358,11 @@ void lios_ui_beat(void)
     g_ui_beat++;
 }
 
-// 定时器回调里只改内存计数，不写日志（实测在定时器回调里做文件 I/O 会不可靠）
+// 定时器回调里只改内存计数，不写日志（实测在定时器回调里做文件 I/O 不可靠）
 static void autotest_step_cb(lv_timer_t *t)
 {
+    (void)t;
     g_autotest_step++;
-    switch (g_autotest_step)
-    {
-    case 1: // 打开第一个内置方块（「文件管理」）
-        tile_activate_locked(1);
-        g_tile_open_cnt++;
-        break;
-    case 2:
-        app_exit_locked();
-        g_app_exit_cnt++;
-        break;
-    case 3:
-        lv_timer_del(t);
-        break;
-    default:
-        break;
-    }
 }
 
 void lios_autotest_start(void)
@@ -409,10 +395,10 @@ static void autotest_arm_timers(void)
     g_autotest_armed_done = true;
     pthread_mutex_unlock(&g_autotest_lock);
 
-    LOCKLV();
-    lv_timer_create(autotest_step_cb, 3000, NULL);
-    UNLOCKLV();
-    lios_log("autotest: 已启动（3 秒后自动打开第一个方块，6 秒后退出应用）");
+    // 不用 LVGL 定时器：实测在「UI 线程起来之前/边缘」建的定时器不可靠。
+    // 自动测试直接由 lios_launcher_screen 的等待循环驱动（那个循环本来就在跑）。
+    g_autotest_active = true;
+    lios_log("autotest: 已启动（3 秒后自动打开第一个方块，再 3 秒后退出应用）");
 }
 
 // ---------------------------------------------------------------- 看门狗
@@ -715,6 +701,7 @@ void lios_launcher_screen(void)
     g_active = true;
 
     // 等退出：菜单键（且没有应用在跑）或者「相机」方块
+    int at_tick = 0; // 自动测试计时（每轮 20ms）
     while (!g_quit)
     {
         bool menu = false;
@@ -730,6 +717,32 @@ void lios_launcher_screen(void)
             lios_log("桌面：菜单键 -> 回相机");
             g_quit = true;
         }
+
+        // 自动测试（默认关闭）：3 秒后打开第一个方块，再 3 秒后退出应用
+        if (g_autotest_active)
+        {
+            at_tick++;
+            if (at_tick == 150 && !g_app_running)
+            {
+                lios_log("autotest: 打开第一个方块");
+                tile_activate(1);
+                g_autotest_step = 1;
+                g_tile_open_cnt++;
+                lios_log("autotest: 打开方块完成（app_running=%d）", g_app_running ? 1 : 0);
+            }
+            else if (at_tick == 300 && g_app_running)
+            {
+                lios_log("autotest: 退出应用");
+                app_exit();
+                g_autotest_step = 2;
+                g_app_exit_cnt++;
+                lios_log("autotest: 退出应用完成（app_running=%d）", g_app_running ? 1 : 0);
+                g_autotest_active = false;
+                g_autotest_step = 3;
+                lios_log("autotest: 全部完成（UI 线程全程存活）");
+            }
+        }
+
         usleep(20000);
     }
 
