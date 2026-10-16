@@ -2,7 +2,7 @@
  * @file perfProbe.h
  *
  * 临时性能计时探针（诊断用，可整体删除：本文件 + src/perfProbe.cpp + 各处的
- * perf_probe_*/PERF_SCOPE 调用点）。
+ * perf_probe_xxx 与 PERF_SCOPE 调用点）。
  *
  * 目的：把「卡顿 / 撕裂」量化，而不是猜。
  *  - 只写 /tmp/perf.log（内存盘 tmpfs），绝不写 /mnt/UDISK，避免日志本身把 SD 卡拖慢。
