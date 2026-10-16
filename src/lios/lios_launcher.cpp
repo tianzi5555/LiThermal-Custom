@@ -352,15 +352,17 @@ static int g_autotest_step = 0;
 static void autotest_hb_cb(lv_timer_t *t)
 {
     (void)t;
-    lios_log("autotest 心跳 #%d（UI 线程还活着；app_running=%d）",
-             ++g_hb_seq, g_app_running ? 1 : 0);
+    g_hb_seq++;
+    // 只在头几次打日志，避免刷屏
+    if (g_hb_seq <= 3 || g_hb_seq % 40 == 0)
+        lios_log("autotest 心跳 #%d（UI 线程活着；app_running=%d）", g_hb_seq, g_app_running ? 1 : 0);
 }
 
 // 同样在 lv_timer_handler（已持锁）里跑：只能调 *_locked 版本
 static void autotest_step_cb(lv_timer_t *t)
 {
     g_autotest_step++;
-    lios_log("autotest 步骤 %d 开始", g_autotest_step);
+    lios_log("autotest 步骤 %d 开始（回调确实进来了）", g_autotest_step);
     switch (g_autotest_step)
     {
     case 1: // 打开第一个内置方块（「文件管理」）
