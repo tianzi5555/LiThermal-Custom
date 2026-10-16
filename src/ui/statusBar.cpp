@@ -15,7 +15,8 @@
 #include <string.h>
 #include <stdlib.h>
 
-#define SB_W 244
+// 满宽（按屏幕宽度取），菜单展开时整条隐藏
+#define SB_W 320
 #define SB_H 24
 #define SB_OPA 204 // ≈80%
 
@@ -104,18 +105,50 @@ static int read_mem_percent(void)
     return pct;
 }
 
+
+// 读 CPU 温度：/sys/class/thermal/thermal_zone0/temp（毫摄氏度）
+// 这台相机目前内核没编 thermal 框架，所以通常读不到，返回 -1000 表示无数据。
+static int read_cpu_temp_x10(void)
+{
+    FILE *f = fopen("/sys/class/thermal/thermal_zone0/temp", "r");
+    if (!f)
+        return -1000;
+    long mc = 0;
+    if (fscanf(f, "%ld", &mc) != 1)
+        mc = -1000000;
+    fclose(f);
+    if (mc <= -100000)
+        return -1000;
+    return (int)(mc / 100); // 0.1 度
+}
+
 static void sb_update(lv_timer_t *t)
 {
     (void)t;
-    if (!sb_lbl || !lv_obj_is_valid(sb_lbl))
+    if (!sb_bar || !lv_obj_is_valid(sb_bar) || !sb_lbl || !lv_obj_is_valid(sb_lbl))
         return;
+
+    // 菜单展开时（右上角会弹出电池卡片）整条隐藏
+    if (current_mode == MODE_MAINMENU)
+        lv_obj_add_flag(sb_bar, LV_OBJ_FLAG_HIDDEN);
+    else
+        lv_obj_clear_flag(sb_bar, LV_OBJ_FLAG_HIDDEN);
+
     int cpu = read_cpu_percent();
     int mem = read_mem_percent();
-    char buf[64];
+    int t10 = read_cpu_temp_x10();
+    char buf[80];
+    char cpus[16], mems[16], temps[20];
     if (cpu < 0)
-        snprintf(buf, sizeof(buf), "CPU --%%   MEM %d%%", mem);
+        snprintf(cpus, sizeof(cpus), "--%%");
     else
-        snprintf(buf, sizeof(buf), "CPU %d%%   MEM %d%%", cpu, mem);
+        snprintf(cpus, sizeof(cpus), "%d%%", cpu);
+    snprintf(mems, sizeof(mems), "%d%%", mem);
+    if (t10 <= -1000)
+        snprintf(temps, sizeof(temps), "--");
+    else
+        snprintf(temps, sizeof(temps), "%d.%dC", t10 / 10, t10 % 10);
+    snprintf(buf, sizeof(buf), "CPU %s  %s  MEM %s", cpus, temps, mems);
     lv_label_set_text(sb_lbl, buf);
 }
 
@@ -125,7 +158,7 @@ void ui_statusbar_create(void)
         return;
 
     sb_bar = lv_obj_create(lv_scr_act());
-    lv_obj_set_size(sb_bar, SB_W, SB_H);
+    lv_obj_set_size(sb_bar, lv_disp_get_hor_res(NULL), SB_H);
     lv_obj_set_pos(sb_bar, 0, 0);
     lv_obj_clear_flag(sb_bar, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_radius(sb_bar, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
@@ -135,7 +168,7 @@ void ui_statusbar_create(void)
     lv_obj_set_style_bg_opa(sb_bar, SB_OPA, LV_PART_MAIN | LV_STATE_DEFAULT);
 
     sb_lbl = lv_label_create(sb_bar);
-    lv_label_set_text(sb_lbl, "CPU --%   MEM --%");
+    lv_label_set_text(sb_lbl, "CPU --  --  MEM --%");
     lv_obj_set_style_text_font(sb_lbl, &ui_font_cn16, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_text_color(sb_lbl, lv_color_hex(0xE8EEF4), LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_align(sb_lbl, LV_ALIGN_LEFT_MID, 2, 0);
