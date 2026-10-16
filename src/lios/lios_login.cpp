@@ -89,6 +89,8 @@ static const char *LOGIN_HELP = "输完密码，滚轮移到「确定」按下";
 // 注意：这里只用 ASCII 的 > 和普通空格，避免 · / → 这类符号缺字形显示成方框
 static const char *LOGIN_GESTURE = "退出登录：菜单 > 录像 > 确认";
 static const char *LOGIN_TAIL = "（直接进相机）";
+// 手势作废时的一行提示（按错/超时都用这个）
+static const char *LOGIN_RESET_MSG = "已取消，重来：菜单>录像>确认";
 
 static uint32_t login_now_ms(void)
 {
@@ -340,7 +342,7 @@ lios_mode_t lios_login_show_and_run(void)
         if (login_exit_step != LOGIN_EXIT_STEP0 && login_exit_t0 != 0 &&
             (now - login_exit_t0) > LOGIN_EXIT_TIMEOUT_MS)
         {
-            login_exit_reset("退出超时，已取消（菜单>录像>确认）");
+            login_exit_reset(LOGIN_RESET_MSG);
         }
 
         // 三步退出：菜单键 → 录像键 → 波轮确认键
@@ -353,7 +355,7 @@ lios_mode_t lios_login_show_and_run(void)
             }
             else
             {
-                login_exit_reset("按键顺序不对，已取消（菜单>录像>确认）");
+                login_exit_reset(LOGIN_RESET_MSG);
             }
         }
         else if (rec_ev)
@@ -365,7 +367,7 @@ lios_mode_t lios_login_show_and_run(void)
             }
             else
             {
-                login_exit_reset("按键顺序不对，已取消（菜单>录像>确认）");
+                login_exit_reset(LOGIN_RESET_MSG);
             }
         }
         else if (enter_ev)
@@ -377,7 +379,7 @@ lios_mode_t lios_login_show_and_run(void)
             }
             else if (login_exit_step != LOGIN_EXIT_STEP0)
             {
-                login_exit_reset("按键顺序不对，已取消（菜单>录像>确认）");
+                login_exit_reset(LOGIN_RESET_MSG);
             }
         }
         if (login_exit_step != LOGIN_EXIT_STEP0)
