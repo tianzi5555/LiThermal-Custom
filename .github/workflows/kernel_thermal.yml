@@ -60,6 +60,13 @@ jobs:
           force_kv THERMAL y
           force_kv SUNXI_THERMAL y
           force_kv THERMAL_OF y
+          # THS 需要 SID/efuse 的校准数据，必须让 SID 注册成 nvmem provider
+          force_kv NVMEM y
+          force_kv NVMEM_SUNXI_SID y
+          force_kv SUNXI_SID y
+          force_kv EEPROM_SUNXI_SID y
+          force_kv SID y
+          force_kv SUNXI_NVMEM y
           make ARCH=arm CROSS_COMPILE=$CROSS_COMPILE olddefconfig
           echo "=== check ==="
           grep -E '^CONFIG_(THERMAL|SUNXI_THERMAL|THERMAL_OF|MODVERSIONS|MODULE_SIG|LOCALVERSION)' .config || true
