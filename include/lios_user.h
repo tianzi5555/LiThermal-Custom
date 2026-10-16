@@ -13,6 +13,8 @@
 //   * 密码界面按「菜单键」= 退出登录 → 直接进相机
 //   * 脚本那层还有超时兜底（thermalcamera.sh 里）
 
+#include <stdbool.h>
+
 #ifdef __cplusplus
 extern "C"
 {
