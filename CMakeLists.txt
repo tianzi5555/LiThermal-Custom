@@ -7,6 +7,7 @@ file(GLOB_RECURSE SRC_DIR_LIST "src/*.cpp" "src/*.c")
 list(FILTER SRC_DIR_LIST EXCLUDE REGEX "/src/apps/")	#閬嶅巻鑾峰彇source/璺緞涓嬫墍鏈夌殑*.cpp鍜?.c鏂囦欢鍒楄〃
 
 add_compile_definitions(LV_CONF_INCLUDE_SIMPLE)	#娣诲姞瀹忓畾涔?add_compile_definitions(USE_SUNXIFB_DOUBLE_BUFFER)
+add_compile_definitions(USE_SUNXIFB_DOUBLE_BUFFER)
 add_compile_definitions(USE_SUNXIFB_CACHE)
 add_compile_definitions(USE_SUNXIFB_G2D)
 add_compile_definitions(USE_SUNXIFB_G2D_ROTATE)
