@@ -350,6 +350,7 @@ static volatile int g_probe_cnt = 0;   // 探测定时器（500ms）触发次数
 static volatile int g_autotest_step = 0; // 自动测试走到第几步
 static volatile int g_tile_open_cnt = 0; // 「打开方块」成功执行了几次
 static volatile int g_app_exit_cnt = 0;  // 「退出应用」成功执行了几次
+static volatile bool g_autotest_wanted = false; // 自动测试是否被请求（/tmp/lios_autotest 存在）
 
 static void autotest_probe_cb(lv_timer_t *t)
 {
@@ -398,12 +399,25 @@ void lios_autotest_start(void)
     if (access("/tmp/lios_autotest", F_OK) != 0)
         return;
     lios_log("=== autotest 已启用（/tmp/lios_autotest 存在）===");
+    // 这里**只登记意图**，真正的 lv_timer_create 交给看门狗线程在 UI 线程跑起来之后做。
+    // 实测教训：在 UI 线程（HAL::lv_loop）还没开始跑之前从主线程建的 LVGL 定时器
+    // 不会被触发（心跳定时器因为是在 UI 线程起来之后建的，所以一直正常）。
+    g_autotest_wanted = true;
+}
+
+// 由看门狗线程在 UI 线程跑起来之后调用（同一入口只做一次）
+static void autotest_arm_timers(void)
+{
+    static bool armed = false;
+    if (armed || !g_autotest_wanted)
+        return;
+    armed = true;
     LOCKLV();
     g_hb_timer = lv_timer_create(autotest_hb_cb, 500, NULL);
     lv_timer_t *st = lv_timer_create(autotest_step_cb, 3000, NULL);
-    lv_timer_t *pr = lv_timer_create(autotest_probe_cb, 500, NULL); // 插到表头（最先处理）
+    lv_timer_t *pr = lv_timer_create(autotest_probe_cb, 500, NULL);
     UNLOCKLV();
-    lios_log("autotest: 定时器 hb=%p step=%p probe=%p（NULL 表示创建失败）",
+    lios_log("autotest: 定时器已建 hb=%p step=%p probe=%p（NULL 表示创建失败）",
              (void *)g_hb_timer, (void *)st, (void *)pr);
 }
 
@@ -431,6 +445,9 @@ static void *lios_watchdog_thread(void *)
     uint32_t last = g_beat;
     int stuck = 0;
     int tick = 0;
+    // 先等 UI 线程跑起来，再把自动测试的定时器建出来（在 UI 线程起来之前建的定时器不会触发）
+    usleep(1500 * 1000);
+    autotest_arm_timers();
     while (!g_wd_stop)
     {
         usleep(500 * 1000);
