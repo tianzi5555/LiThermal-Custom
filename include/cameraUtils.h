@@ -43,9 +43,14 @@ public:
     temperature_point_t lastResult;
     float lastCenterTemperature;
     bool connected = false;
+    // 热成像模组（4117）自己的状态，从它的 ISAPI 读；读不到就是 -1
+    int moduleCpu = -1;
+    int moduleMem = -1;
+    bool moduleOk = false;
     bool checkCameraConnection(); // 检查摄像头连接
     void setCameraIP();           // 设置摄像头固定IP
     void initHTTPClient();        // 初始化HTTP客户端（即设置HTTP认证）
+    void getModuleStatus();       // 读 4117 自己的 CPU/内存占用（节流调用）
     void getTemperature();        // 获取摄像头温度信息
     void setColorPalette(int palette);
     void setDigitalNoiceReduce(int mode, int frameLevel, int interFrameLevel);

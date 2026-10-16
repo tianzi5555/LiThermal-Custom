@@ -1,0 +1,103 @@
+name: Build T113 kernel with thermal sensor (CPU temp)
+
+# 给 LiThermal 相机（T113-S3 / Tina Linux 5.4.61）编一个【带温度传感器驱动】的内核。
+#
+# 为什么必须重编内核而不是加模块：
+#   CONFIG_THERMAL（thermal 框架核心）是 bool，只能内建；相机现在没开，
+#   所以 SINXI_THERMAL 即便是 tristate 也没法单独编成模块用。
+#
+# 只改两处、别的保持相机原配置：
+#   CONFIG_THERMAL=y
+#   CONFIG_SUNXI_THERMAL=y
+# vermagic 仍是 5.4.61 SMP preempt...，所以现有的应用和其它模块不受影响。
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "main" ]
+    paths:
+      - ".github/workflows/kernel_thermal.yml"
+      - ".github/kernel/**"
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    steps:
+      - name: 取出本仓库
+        uses: actions/checkout@v4
+
+      - name: 安装依赖
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential bc bison flex libssl-dev libelf-dev \
+            libncurses5-dev rsync cpio kmod python3 wget xz-utils device-tree-compiler
+
+      - name: 拉取交叉工具链（与相机内核同款 gcc 6.4.1 musl）
+        run: |
+          git clone --depth 1 https://github.com/diylxy/LiThermal_Compiler.git tc
+          ls tc/toolchain-sunxi-musl/toolchain/bin | grep -E 'gcc' | head -5
+
+      - name: 拉取内核源码（T113 Tina Linux 5.4.61）
+        run: |
+          git clone --depth 1 https://github.com/Noooooob233/tina-d1-linux-5.4.git linux
+          cd linux
+          head -5 Makefile
+          grep -E '^(VERSION|PATCHLEVEL|SUBLEVEL) =' Makefile
+          touch .scmversion
+
+      - name: 用相机配置 + 打开温度驱动
+        run: |
+          set -e
+          export PATH="$GITHUB_WORKSPACE/tc/toolchain-sunxi-musl/toolchain/bin:$PATH"
+          export ARCH=arm
+          export CROSS_COMPILE=arm-openwrt-linux-muslgnueabi-
+          export STAGING_DIR="$GITHUB_WORKSPACE/tc/target"
+          cd linux
+          cp "$GITHUB_WORKSPACE/.github/kernel/t113_kernel.config" .config
+          force_kv() {
+            if grep -q "^# CONFIG_$1 is not set" .config; then
+              sed -i "s/^# CONFIG_$1 is not set/CONFIG_$1=$2/" .config
+            elif grep -q "^CONFIG_$1=" .config; then
+              sed -i "s/^CONFIG_$1=.*/CONFIG_$1=$2/" .config
+            else
+              echo "CONFIG_$1=$2" >> .config
+            fi
+          }
+          force_kv THERMAL y
+          force_kv SUNXI_THERMAL y
+          force_kv THERMAL_OF y
+          force_kv THERMAL_WRITABLE_TRIPS n
+          force_kv THERMAL_DEFAULT_GOV_STEP_WISE y
+          # 相机内核没导出 __stack_chk_guard，保持与原内核一致的栈保护设置（原配置就是 y，别动）
+          make ARCH=arm CROSS_COMPILE=$CROSS_COMPILE olddefconfig
+          echo "=== 确认 ==="
+          grep -E '^CONFIG_(THERMAL|SUNXI_THERMAL|THERMAL_OF|MODVERSIONS|MODULE_SIG|LOCALVERSION)' .config || true
+          grep -q '^CONFIG_THERMAL=y' .config || { echo "!! THERMAL 没打开"; exit 1; }
+          grep -q '^CONFIG_SUNXI_THERMAL=y' .config || { echo "!! SUNXI_THERMAL 没打开"; exit 1; }
+
+      - name: 编译内核与设备树
+        run: |
+          set -o pipefail
+          export PATH="$GITHUB_WORKSPACE/tc/toolchain-sunxi-musl/toolchain/bin:$PATH"
+          export ARCH=arm
+          export CROSS_COMPILE=arm-openwrt-linux-muslgnueabi-
+          export STAGING_DIR="$GITHUB_WORKSPACE/tc/target"
+          cd linux
+          make -j"$(nproc)" zImage dtbs 2>&1 | tail -60
+          echo "===== 产物 ====="
+          ls -l arch/arm/boot/zImage
+          ls -l arch/arm/boot/dts/*.dtb 2>/dev/null | head -20
+          echo "===== vermagic 来源（内核版本）====="
+          cat include/config/kernel.release 2>/dev/null || true
+          strings arch/arm/boot/zImage | grep -m3 '5\.4\.61'
+
+      - name: 上传内核
+        uses: actions/upload-artifact@v4
+        with:
+          name: t113-kernel-thermal
+          path: |
+            linux/arch/arm/boot/zImage
+            linux/arch/arm/boot/dts/sun8iw20*.dtb
+            linux/arch/arm/boot/dts/*t113*.dtb
+          if-no-files-found: warn

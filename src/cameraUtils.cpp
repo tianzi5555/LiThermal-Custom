@@ -36,6 +36,57 @@ void CameraUtils::initHTTPClient()
     cli.set_basic_auth("admin", "Ab123456");
 }
 #include <cJSON.h>
+
+// 读 4117 热成像模组自己的运行状态：CPU 占用 / 内存占用
+// 接口：GET /ISAPI/System/status -> DeviceStatus.CPUList.CPU.cpuUtilization / MemoryList.Memory.memoryUsage
+void CameraUtils::getModuleStatus()
+{
+    std::lock_guard<std::mutex> lock(cli_mutex);
+    auto res = cli.Get("/ISAPI/System/status");
+    if (!res || res->status != 200)
+    {
+        moduleOk = false;
+        return;
+    }
+    cJSON *root = cJSON_Parse(res->body.c_str());
+    if (!root)
+    {
+        moduleOk = false;
+        return;
+    }
+    int cpu = -1, mem = -1;
+    cJSON *cpuList = cJSON_GetObjectItem(root, "CPUList");
+    if (cpuList)
+    {
+        cJSON *cpuItem = cJSON_GetObjectItem(cpuList, "CPU");
+        if (cpuItem && cJSON_IsArray(cpuItem))
+            cpuItem = cJSON_GetArrayItem(cpuItem, 0);
+        if (cpuItem)
+        {
+            cJSON *v = cJSON_GetObjectItem(cpuItem, "cpuUtilization");
+            if (v && cJSON_IsNumber(v))
+                cpu = (int)v->valuedouble;
+        }
+    }
+    cJSON *memList = cJSON_GetObjectItem(root, "MemoryList");
+    if (memList)
+    {
+        cJSON *memItem = cJSON_GetObjectItem(memList, "Memory");
+        if (memItem && cJSON_IsArray(memItem))
+            memItem = cJSON_GetArrayItem(memItem, 0);
+        if (memItem)
+        {
+            cJSON *v = cJSON_GetObjectItem(memItem, "memoryUsage");
+            if (v && cJSON_IsNumber(v))
+                mem = (int)v->valuedouble;
+        }
+    }
+    cJSON_Delete(root);
+    moduleCpu = cpu;
+    moduleMem = mem;
+    moduleOk = (cpu >= 0);
+}
+
 void CameraUtils::getTemperature()
 {
     std::lock_guard<std::mutex> cli_lock(cli_mutex);
