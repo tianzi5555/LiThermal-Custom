@@ -193,10 +193,10 @@ void *thread_hal_func(void *)
             // 处理相册操作
             menu_gallery_loop(false); // false表示没有返回事件
         }
-        else if (current_mode == MODE_WIFI_SETTINGS)
+        else if (current_mode == MODE_TERMINAL)
         {
             // WiFi 设置页：刷新扫描结果/状态；返回键由 refresh_menu_key 转发
-            menu_wifi_loop(false);
+            menu_terminal_loop(false);
         }
         else // 清零提取出的编码器变化值
         {

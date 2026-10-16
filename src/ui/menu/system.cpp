@@ -162,6 +162,30 @@ static void card_menu_system_construct(lv_obj_t *parent)
     lv_obj_set_style_text_align(ui_Label15, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_text_font(ui_Label15, &ui_font_chinese16, LV_PART_MAIN | LV_STATE_DEFAULT);
 
+    // 「SH 终端」入口：任何时候都能进去执行 root 命令（自救通道）
+    lv_obj_t *ui_ButtonTerm = lv_btn_create(parent);
+    lv_obj_set_width(ui_ButtonTerm, 270);
+    lv_obj_set_height(ui_ButtonTerm, 32);
+    lv_obj_set_x(ui_ButtonTerm, 0);
+    lv_obj_set_y(ui_ButtonTerm, 145);
+    lv_obj_add_flag(ui_ButtonTerm, LV_OBJ_FLAG_SCROLL_ON_FOCUS);
+    lv_obj_clear_flag(ui_ButtonTerm, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(ui_ButtonTerm, lv_color_hex(0x2B6CB0), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_opa(ui_ButtonTerm, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_color(ui_ButtonTerm, lv_color_hex(0x3E8FDD), LV_PART_MAIN | LV_STATE_FOCUSED);
+    lv_obj_set_style_bg_opa(ui_ButtonTerm, 255, LV_PART_MAIN | LV_STATE_FOCUSED);
+    lv_obj_t *ui_LabelTerm = lv_label_create(ui_ButtonTerm);
+    lv_label_set_text(ui_LabelTerm, "SH 终端（root 命令）");
+    lv_obj_set_style_text_font(ui_LabelTerm, &ui_font_cn16, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_center(ui_LabelTerm);
+    lv_obj_add_event_cb(ui_ButtonTerm, [](lv_event_t *e) {
+        LOCKLV();
+        menu_system_hide();
+        UNLOCKLV();
+        menu_terminal_show();
+        current_mode = MODE_TERMINAL;
+    }, LV_EVENT_CLICKED, NULL);
+
     lv_group_focus_obj(ui_Button1);
 
     lv_obj_add_event_cb(ui_Checkbox6, [](lv_event_t *e)

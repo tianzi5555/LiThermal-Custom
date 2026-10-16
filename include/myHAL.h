@@ -16,7 +16,7 @@ typedef enum {
     MODE_GALLERY_MENU,
     MODE_CAMERA_SETTINGS,
     MODE_SYSTEM_SETTINGS,
-    MODE_WIFI_SETTINGS,
+    MODE_TERMINAL,
 }current_mode_t;
 extern current_mode_t current_mode;         // 当前设备所处模式
 extern int last_encoder_direction;          // 记录编码器变化，用于亮度调节或相册
