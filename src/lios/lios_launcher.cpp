@@ -396,7 +396,9 @@ static void autotest_step_cb(lv_timer_t *t)
 
 void lios_autotest_start(void)
 {
-    if (access("/tmp/lios_autotest", F_OK) != 0)
+    int r = access("/tmp/lios_autotest", F_OK);
+    lios_log("autotest 入口: access(/tmp/lios_autotest)=%d", r);
+    if (r != 0)
         return;
     lios_log("=== autotest 已启用（/tmp/lios_autotest 存在）===");
     // 这里**只登记意图**，真正的 lv_timer_create 交给看门狗线程在 UI 线程跑起来之后做。
@@ -447,6 +449,7 @@ static void *lios_watchdog_thread(void *)
     int tick = 0;
     // 先等 UI 线程跑起来，再把自动测试的定时器建出来（在 UI 线程起来之前建的定时器不会触发）
     usleep(1500 * 1000);
+    lios_log("看门狗: 准备 arm 自动测试（wanted=%d）", g_autotest_wanted ? 1 : 0);
     autotest_arm_timers();
     while (!g_wd_stop)
     {

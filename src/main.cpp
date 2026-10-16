@@ -213,7 +213,16 @@ int main(int argc, char **argv)
     sleep(1); // Why?
     system("mkdir " GALLERY_PATH);
     system("mkdir " GALLERY2_PATH);
-    pthread_mutex_init(&lv_mutex, NULL);
+    pthread_mutexattr_t lv_mutex_attr;
+    pthread_mutexattr_init(&lv_mutex_attr);
+    // 关键：用**递归**互斥锁。lv_mutex 保护的是 LVGL，而 LVGL 的输入事件是在
+    // lv_timer_handler() 内部派发的，事件回调执行时本线程已经持有这把锁；
+    // 如果哪天某个回调里又写了 LOCKLV()，非递归锁会立刻自锁死
+    // （表现：整机卡死、连电源键都没反应，只能断电 —— 第二期就踩过这个坑）。
+    // 设成递归锁之后，这种写法最多是多加一次引用计数，不会再锁死。
+    pthread_mutexattr_settype(&lv_mutex_attr, PTHREAD_MUTEX_RECURSIVE);
+    pthread_mutex_init(&lv_mutex, &lv_mutex_attr);
+    pthread_mutexattr_destroy(&lv_mutex_attr);
     HAL::init();
     readFiles(GALLERY_PATH);
     lv_obj_clear_flag(lv_scr_act(), LV_OBJ_FLAG_SCROLLABLE);
