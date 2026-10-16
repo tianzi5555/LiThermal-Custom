@@ -10,11 +10,11 @@
 #define KB_ROWS 4
 #define KB_COLS 10
 #define KB_N (KB_ROWS * KB_COLS)
-#define KB_KEY_W 26
-#define KB_KEY_H 24
+#define KB_KEY_W 24
+#define KB_KEY_H 20
 #define KB_PITCH_X 29
-#define KB_PITCH_Y 26
-#define KB_INPUT_H 26
+#define KB_PITCH_Y 22
+#define KB_INPUT_H 24
 
 static const char *PAGE0[KB_N] = {
     "a", "b", "c", "d", "e", "f", "g", "h", "i", "j",
@@ -212,16 +212,16 @@ ui_kb_t *ui_kb_create(lv_obj_t *parent, lv_coord_t y, lv_coord_t w,
     // 功能行
     lv_coord_t fy = y0 + KB_ROWS * KB_PITCH_Y;
     lv_coord_t bw = 47, gap = 1;
-    kb->btn_page = make_btn(kb->root, page_name(0), 0, fy, bw, 24);
+    kb->btn_page = make_btn(kb->root, page_name(0), 0, fy, bw, 22);
     lv_obj_add_event_cb(kb->btn_page, kb_page_cb, LV_EVENT_CLICKED, kb);
     lv_obj_t *b;
-    b = make_btn(kb->root, "空格", (bw + gap) * 1, fy, bw, 24);
+    b = make_btn(kb->root, "空格", (bw + gap) * 1, fy, bw, 22);
     lv_obj_add_event_cb(b, kb_space_cb, LV_EVENT_CLICKED, kb);
-    b = make_btn(kb->root, "删", (bw + gap) * 2, fy, bw, 24);
+    b = make_btn(kb->root, "删", (bw + gap) * 2, fy, bw, 22);
     lv_obj_add_event_cb(b, kb_del_cb, LV_EVENT_CLICKED, kb);
-    b = make_btn(kb->root, "清空", (bw + gap) * 3, fy, bw, 24);
+    b = make_btn(kb->root, "清空", (bw + gap) * 3, fy, bw, 22);
     lv_obj_add_event_cb(b, kb_clear_cb, LV_EVENT_CLICKED, kb);
-    b = make_btn(kb->root, action_label ? action_label : "确定", (bw + gap) * 4, fy, bw, 24);
+    b = make_btn(kb->root, action_label ? action_label : "确定", (bw + gap) * 4, fy, bw, 22);
     lv_obj_set_style_bg_color(b, lv_color_hex(0x1E7F4F), LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_add_event_cb(b, kb_action_cb, LV_EVENT_CLICKED, kb);
 

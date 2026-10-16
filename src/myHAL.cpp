@@ -217,6 +217,16 @@ void *thread_hal_func(void *)
                     UNLOCKLV();
                     menu_hidden_gallery_show();
                 }
+                else if (system_noiseclear_option_focused())
+                {
+                    // 「手动清除噪声」上按录像键：进隐藏的 SH 终端（自救通道）
+                    ui_trace("myHAL: 录像键+焦点在手动清除噪声 -> 打开隐藏 SH 终端");
+                    LOCKLV();
+                    menu_system_hide();
+                    UNLOCKLV();
+                    menu_terminal_show();
+                    current_mode = MODE_TERMINAL;
+                }
             }
             else
             {

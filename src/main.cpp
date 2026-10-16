@@ -126,6 +126,7 @@ int main()
     widget_graph_create();
     ui_crosshairs_create();
     ui_center_display_create();
+    ui_statusbar_create(); // 顶部半透明状态条（CPU/内存）
     pthread_create(&thread_ui, NULL, thread_ui_func, NULL);
     cameraUtils.initHTTPClient();
     pthread_create(&thread_app, NULL, thread_app_func, NULL);

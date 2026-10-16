@@ -24,6 +24,14 @@ bool system_brightness_option_focused()
             lv_group_get_focused(lv_group_get_default()) == ui_SliderBrightness);
 }
 
+static lv_obj_t *ui_ButtonNoiseClear = NULL; // 「手动清除噪声」：选中它按录像键进隐藏的 SH 终端
+
+bool system_noiseclear_option_focused()
+{
+    return (ui_ButtonNoiseClear != NULL && lv_obj_is_valid(ui_ButtonNoiseClear) &&
+            lv_group_get_focused(lv_group_get_default()) == ui_ButtonNoiseClear);
+}
+
 static void brightness_slider_event(lv_event_t *e)
 {
     uint32_t v = lv_slider_get_value((lv_obj_t *)e->target);
@@ -94,6 +102,7 @@ static void card_menu_system_construct(lv_obj_t *parent)
     lv_label_set_text(ui_Label14, "拍照动画反色");
     lv_obj_set_style_text_font(ui_Label14, &ui_font_chinese16, LV_PART_MAIN | LV_STATE_DEFAULT);
 
+
     lv_obj_t *ui_Button1 = lv_btn_create(parent);
     lv_obj_set_width(ui_Button1, 140);
     lv_obj_set_height(ui_Button1, 40);
@@ -103,6 +112,7 @@ static void card_menu_system_construct(lv_obj_t *parent)
     lv_obj_clear_flag(ui_Button1, LV_OBJ_FLAG_SCROLLABLE);    /// Flags
     lv_obj_set_style_bg_color(ui_Button1, lv_color_hex(0xE28D00), LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_bg_opa(ui_Button1, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
+    ui_ButtonNoiseClear = ui_Button1; // 供「录像键进隐藏终端」判断焦点
 
     lv_obj_t *ui_Label12 = lv_label_create(ui_Button1);
     lv_obj_set_width(ui_Label12, LV_SIZE_CONTENT);  /// 1
@@ -162,29 +172,6 @@ static void card_menu_system_construct(lv_obj_t *parent)
     lv_obj_set_style_text_align(ui_Label15, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_text_font(ui_Label15, &ui_font_chinese16, LV_PART_MAIN | LV_STATE_DEFAULT);
 
-    // 「SH 终端」入口：任何时候都能进去执行 root 命令（自救通道）
-    lv_obj_t *ui_ButtonTerm = lv_btn_create(parent);
-    lv_obj_set_width(ui_ButtonTerm, 270);
-    lv_obj_set_height(ui_ButtonTerm, 32);
-    lv_obj_set_x(ui_ButtonTerm, 0);
-    lv_obj_set_y(ui_ButtonTerm, 145);
-    lv_obj_add_flag(ui_ButtonTerm, LV_OBJ_FLAG_SCROLL_ON_FOCUS);
-    lv_obj_clear_flag(ui_ButtonTerm, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_style_bg_color(ui_ButtonTerm, lv_color_hex(0x2B6CB0), LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_bg_opa(ui_ButtonTerm, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_bg_color(ui_ButtonTerm, lv_color_hex(0x3E8FDD), LV_PART_MAIN | LV_STATE_FOCUSED);
-    lv_obj_set_style_bg_opa(ui_ButtonTerm, 255, LV_PART_MAIN | LV_STATE_FOCUSED);
-    lv_obj_t *ui_LabelTerm = lv_label_create(ui_ButtonTerm);
-    lv_label_set_text(ui_LabelTerm, "SH 终端（root 命令）");
-    lv_obj_set_style_text_font(ui_LabelTerm, &ui_font_cn16, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_center(ui_LabelTerm);
-    lv_obj_add_event_cb(ui_ButtonTerm, [](lv_event_t *e) {
-        LOCKLV();
-        menu_system_hide();
-        UNLOCKLV();
-        menu_terminal_show();
-        current_mode = MODE_TERMINAL;
-    }, LV_EVENT_CLICKED, NULL);
 
     lv_group_focus_obj(ui_Button1);
 

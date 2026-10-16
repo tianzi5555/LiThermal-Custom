@@ -72,6 +72,7 @@ void crosshair_settings_hide();
 bool crosshair_settings_is_open();
 bool system_crosshair_option_focused();
 bool system_brightness_option_focused();
+bool system_noiseclear_option_focused(); // 「手动清除噪声」是否被选中（进隐藏终端用）
 
 // 隐藏相册（dcim2）：在系统设置亮度条上按录像键进入
 void menu_hidden_gallery_show();

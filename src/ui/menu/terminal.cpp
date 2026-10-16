@@ -192,6 +192,18 @@ static void btn_usb_restore_cb(lv_event_t *e)
     do_exec(cmd);
 }
 
+
+static void btn_clear_logs_cb(lv_event_t *e)
+{
+    (void)e;
+    do_exec("before=$(df /mnt/UDISK | awk 'NR==2{print $4}'); "
+            "rm -f /mnt/UDISK/*.log; sync; "
+            "after=$(df /mnt/UDISK | awk 'NR==2{print $4}'); "
+            "echo '已清除 /mnt/UDISK/*.log'; "
+            "echo \"可用空间: ${before}KB -> ${after}KB\"; "
+            "ls /mnt/UDISK/*.log 2>&1");
+}
+
 static void close_cb(lv_event_t *e)
 {
     (void)e;
@@ -219,8 +231,8 @@ void menu_terminal_show(void)
 
     // 两个保命快捷键
     lv_obj_t *b1 = lv_btn_create(root);
-    lv_obj_set_size(b1, 84, 20);
-    lv_obj_set_pos(b1, TERM_CARD_W - 178, 0);
+    lv_obj_set_size(b1, 78, 20);
+    lv_obj_set_pos(b1, TERM_CARD_W - 244, 0);
     lv_obj_clear_flag(b1, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_t *l1 = lv_label_create(b1);
     lv_label_set_text(l1, "USB 状态");
@@ -229,8 +241,8 @@ void menu_terminal_show(void)
     lv_obj_add_event_cb(b1, btn_usb_status_cb, LV_EVENT_CLICKED, NULL);
 
     lv_obj_t *b2 = lv_btn_create(root);
-    lv_obj_set_size(b2, 84, 20);
-    lv_obj_set_pos(b2, TERM_CARD_W - 90, 0);
+    lv_obj_set_size(b2, 78, 20);
+    lv_obj_set_pos(b2, TERM_CARD_W - 164, 0);
     lv_obj_clear_flag(b2, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_color(b2, lv_color_hex(0x1E7F4F), LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_t *l2 = lv_label_create(b2);
@@ -239,17 +251,23 @@ void menu_terminal_show(void)
     lv_obj_center(l2);
     lv_obj_add_event_cb(b2, btn_usb_restore_cb, LV_EVENT_CLICKED, NULL);
 
-    // 提示行
-    lbl_hint = lv_label_create(root);
-    lv_obj_set_pos(lbl_hint, 2, 22);
-    lv_label_set_text(lbl_hint, "输入命令后按「执行」；USB 出问题先按「恢复 USB」");
-    lv_obj_set_style_text_font(lbl_hint, &ui_font_cn16, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_text_color(lbl_hint, lv_color_hex(0x9AA7B4), LV_PART_MAIN | LV_STATE_DEFAULT);
+
+    lv_obj_t *b3 = lv_btn_create(root);
+    lv_obj_set_size(b3, 78, 20);
+    lv_obj_set_pos(b3, TERM_CARD_W - 84, 0);
+    lv_obj_clear_flag(b3, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(b3, lv_color_hex(0x8A4B12), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_t *l3 = lv_label_create(b3);
+    lv_label_set_text(l3, "清除日志");
+    lv_obj_set_style_text_font(l3, &ui_font_cn16, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_center(l3);
+    lv_obj_add_event_cb(b3, btn_clear_logs_cb, LV_EVENT_CLICKED, NULL);
+
 
     // 输出区
     out_cont = lv_obj_create(root);
-    lv_obj_set_size(out_cont, TERM_CARD_W - 8, 78);
-    lv_obj_set_pos(out_cont, 0, 40);
+    lv_obj_set_size(out_cont, TERM_CARD_W - 8, 76);
+    lv_obj_set_pos(out_cont, 0, 22);
     lv_obj_set_flex_flow(out_cont, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_style_pad_all(out_cont, 3, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_pad_row(out_cont, 2, LV_PART_MAIN | LV_STATE_DEFAULT);
@@ -258,7 +276,7 @@ void menu_terminal_show(void)
     out_append("就绪。示例：\n  uname -a\n  df -h\n  ls /mnt/UDISK\n  sh /mnt/UDISK/fixusb.sh\n");
 
     // 键盘（含输入框），放最下面
-    kb = ui_kb_create(root, 122, TERM_CARD_W - 8, "执行", kb_action, NULL);
+    kb = ui_kb_create(root, 100, TERM_CARD_W - 8, "执行", kb_action, NULL);
 
     card_term.show(CARD_ANIM_FLY_UP);
     term_open = true;
