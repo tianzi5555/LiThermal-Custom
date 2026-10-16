@@ -102,6 +102,8 @@ static void *thread_refreshEncoder(void *)
 // LVGL编码器读取
 static void encoder_read(lv_indev_drv_t *drv, lv_indev_data_t *data)
 {
+    // 主界面/相册里滚轮另有用途（数码变焦、亮度和翻页），不交给 LVGL；
+    // 其它模式（含 LiOS 的登录界面和桌面）都交给 LVGL 走焦点。
     if (current_mode != MODE_MAINPAGE && current_mode != MODE_GALLERY)
         data->enc_diff = encoder_new_move;
     else
@@ -201,6 +203,14 @@ void *thread_hal_func(void *)
         {
             // WiFi 设置页：刷新扫描结果/状态；返回键由 refresh_menu_key 转发
             menu_terminal_loop(false);
+        }
+        else if (current_mode == MODE_LOGIN || current_mode == MODE_LIOS)
+        {
+            // LiOS：登录界面/桌面的按键由 lios_login.cpp / lios_desktop.cpp 自己处理，
+            // 这里只把提取出的编码器变化量清掉（别让它泄到别的模式）
+            last_encoder_direction = 0;
+            HAL::key_press_event[2] = false;
+            HAL::key_press_event[3] = false;
         }
         else // 清零提取出的编码器变化值
         {

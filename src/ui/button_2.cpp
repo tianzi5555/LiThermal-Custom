@@ -163,6 +163,10 @@ void menu_system_hide();
 
 void refresh_menu_key()
 {
+    // LiOS 第一期：登录界面 / LiOS 桌面的菜单键由各自的模块处理
+    // （登录界面=退出登录直接进相机，桌面=回相机），这里不能抢，也不要清事件
+    if (current_mode == MODE_LOGIN || current_mode == MODE_LIOS)
+        return;
     if (crosshair_settings_is_open())
     {
         if (HAL::key_press_event[1] == true)

@@ -71,7 +71,8 @@ static void sb_update(lv_timer_t *t)
         return;
 
     static bool was_hidden = false;
-    bool hide = (current_mode == MODE_MAINMENU) || menu_terminal_is_open();
+    // 菜单展开/终端/开机密码界面隐藏；LiOS 桌面要保留（设计稿要求右上角状态条沿用）
+    bool hide = (current_mode == MODE_MAINMENU) || (current_mode == MODE_LOGIN) || menu_terminal_is_open();
     if (hide)
     {
         if (!was_hidden) { lv_obj_add_flag(sb_box, LV_OBJ_FLAG_HIDDEN); was_hidden = true; }

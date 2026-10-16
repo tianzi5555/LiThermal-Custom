@@ -1,6 +1,7 @@
 #include "my_main.h"
 #include "uiTrace.h"
 #include "statusBar.h"
+#include "lios_user.h" // LiOS 第一期：开机密码 + 两种顶层模式（--login）
 #include "perfProbe.h" // 临时性能探针（诊断用，可删）
 #include <signal.h>
 #include <fcntl.h>
@@ -176,7 +177,7 @@ void *thread_temp_poll_func(void *)
     return NULL;
 }
 
-int main()
+int main(int argc, char **argv)
 {
     perf_probe_init(); // 临时性能探针：/tmp/perf.log，每 1 秒汇总一行（诊断用，可删）
     install_crash_handler();
@@ -190,6 +191,20 @@ int main()
     lv_obj_clear_flag(lv_scr_act(), LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_clear_flag(lv_layer_top(), LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_clear_flag(lv_layer_sys(), LV_OBJ_FLAG_SCROLLABLE);
+
+    // ---- LiOS 第一期：开机密码 + 两种顶层模式 ----
+    // 不带 --login 时 lios_user_prepare 返回 false，下面这段整段跳过，
+    // 行为与改动前**完全一致**（绝不影响现有部署）。
+    bool enter_lios_mode = false;
+    if (lios_user_prepare(argc, argv))
+    {
+        current_mode = MODE_LOGIN; // 让滚轮/按键交给密码界面（见 myHAL.cpp: encoder_read）
+        lios_mode_t m = lios_login_show_and_run();
+        enter_lios_mode = (m == LIOS_ENTER_LIOS);
+        current_mode = enter_lios_mode ? MODE_LIOS : MODE_MAINPAGE;
+        printf("[lios] 进入%s\n", enter_lios_mode ? " LiOS 模式" : "相机");
+    }
+
     printf("Loop begin\n");
     waitboot_scr_load(lv_scr_act());
     widget_graph_create();
@@ -198,6 +213,17 @@ int main()
     ui_statusbar_create(); // 顶部半透明状态条（CPU/内存）
     pthread_create(&thread_ui, NULL, thread_ui_func, NULL);
     cameraUtils.initHTTPClient();
+
+    if (enter_lios_mode)
+    {
+        // LiOS 模式：UI 线程照常跑，但先不连相机、不启相机相关线程，
+        // 只显示占位桌面；按菜单键退出桌面后才继续原来的相机初始化流程。
+        // 注意：这里还没进相机，所以当前的“回相机”只是回相机界面，
+        //       「用 LiOS 密码重新登录 LiOS」放在第二期做（本期不锁死用户）。
+        lios_launcher_screen();
+        printf("[lios] 退出 LiOS 桌面，继续相机初始化\n");
+    }
+
     pthread_create(&thread_app, NULL, thread_app_func, NULL);
     pthread_create(&thread_temp_poll, NULL, thread_temp_poll_func, NULL); // 温度轮询独立线程
     pthread_create(&thread_center_temp, NULL, thread_center_temp_func, NULL);
