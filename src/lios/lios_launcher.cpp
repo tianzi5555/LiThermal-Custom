@@ -14,6 +14,7 @@
 #include "lios_launcher.h"
 #include "lios_user.h"
 #include "my_main.h"
+#include "statusBar.h" // ui_statusbar_create()
 #include "lios_app.h"
 
 #include <dirent.h>
