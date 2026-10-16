@@ -1,10 +1,11 @@
-name: Build T113 kernel with thermal sensor (CPU temp)
+name: Kernel-thermal
+# Build a T113 (Tina Linux 5.4.61) kernel with the thermal sensor driver enabled.
+# CONFIG_THERMAL is a bool and is currently off, so SUNXI_THERMAL cannot be a module.
+# Only two options are forced on; everything else keeps the camera's original config.
+# Only zImage is built: the thermal node (2009400.ths) already exists in the camera dtb.
+# Allwinner's zImage target depends on dtbs -> board.dtb, which this config does not
+# define, so we touch a placeholder first.
 
-# 缂?LiThermal 閻╁憡婧€閿涘湵113-S3 / Tina Linux 5.4.61閿涘绱稉鈧稉顏傗偓鎰敨濞撯晛瀹虫导鐘冲妳閸ｃ劑鈹嶉崝銊ｂ偓鎴犳畱閸愬懏鐗抽妴?#
-# 娑撹桨绮堟稊鍫濈箑妞ゅ鍣哥紓鏍у敶閺嶆瓕鈧奔绗夐弰顖氬濡€虫健閿?#   CONFIG_THERMAL閿涘澅hermal 濡楀棙鐏﹂弽绋跨妇閿涘妲?bool閿涘苯褰ч懗钘夊敶瀵ょ尨绱遍惄鍛婃簚閻滄澘婀▽鈥崇磻閿?#   閹碘偓娴?SINXI_THERMAL 閸楀厖绌堕弰?tristate 娑旂喐鐥呭▔鏇炲礋閻欘剛绱幋鎰侀崸妤冩暏閵?#
-# 閸欘亝鏁兼稉銈咁槱閵嗕礁鍩嗛惃鍕箽閹镐胶娴夐張鍝勫斧闁板秶鐤嗛敍?#   CONFIG_THERMAL=y
-#   CONFIG_SUNXI_THERMAL=y
-# vermagic 娴犲秵妲?5.4.61 SMP preempt...閿涘本澧嶆禒銉у箛閺堝娈戞惔鏃傛暏閸滃苯鍙剧€瑰啯膩閸фぞ绗夐崣妤€濂栭崫宥冣偓?
 on:
   workflow_dispatch:
   push:
@@ -18,26 +19,28 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 180
     steps:
-      - name: 閸欐牕鍤張顑跨波鎼?        uses: actions/checkout@v4
+      - name: checkout
+        uses: actions/checkout@v4
 
-      - name: 鐎瑰顥婃笟婵婄
+      - name: deps
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq build-essential bc bison flex libssl-dev libelf-dev \
-            libncurses5-dev rsync cpio kmod python3 wget xz-utils device-tree-compiler
+          sudo apt-get install -y -qq build-essential bc bison flex libssl-dev libelf-dev libncurses5-dev rsync cpio kmod python3 wget xz-utils device-tree-compiler
 
-      - name: 閹峰褰囨禍銈呭级瀹搞儱鍙块柧鎾呯礄娑撳海娴夐張鍝勫敶閺嶇鎮撳▎?gcc 6.4.1 musl閿?        run: |
+      - name: toolchain
+        run: |
           git clone --depth 1 https://github.com/diylxy/LiThermal_Compiler.git tc
           ls tc/toolchain-sunxi-musl/toolchain/bin | grep -E 'gcc' | head -5
 
-      - name: 閹峰褰囬崘鍛壋濠ф劗鐖滈敍鍦?13 Tina Linux 5.4.61閿?        run: |
+      - name: kernel-src
+        run: |
           git clone --depth 1 https://github.com/Noooooob233/tina-d1-linux-5.4.git linux
           cd linux
-          head -5 Makefile
           grep -E '^(VERSION|PATCHLEVEL|SUBLEVEL) =' Makefile
           touch .scmversion
 
-      - name: 閻劎娴夐張娲帳缂?+ 閹垫挸绱戝〒鈺佸妞瑰崬濮?        run: |
+      - name: config
+        run: |
           set -e
           export PATH="$GITHUB_WORKSPACE/tc/toolchain-sunxi-musl/toolchain/bin:$PATH"
           export ARCH=arm
@@ -57,16 +60,13 @@ jobs:
           force_kv THERMAL y
           force_kv SUNXI_THERMAL y
           force_kv THERMAL_OF y
-          force_kv THERMAL_WRITABLE_TRIPS n
-          force_kv THERMAL_DEFAULT_GOV_STEP_WISE y
-          # 閻╁憡婧€閸愬懏鐗冲▽鈥愁嚤閸?__stack_chk_guard閿涘奔绻氶幐浣风瑢閸樼喎鍞撮弽闀愮閼峰娈戦弽鍫滅箽閹躲倛顔曠純顕嗙礄閸樼喖鍘ょ純顔兼皑閺?y閿涘苯鍩嗛崝顭掔礆
           make ARCH=arm CROSS_COMPILE=$CROSS_COMPILE olddefconfig
-          echo "=== 绾喛顓?==="
+          echo "=== check ==="
           grep -E '^CONFIG_(THERMAL|SUNXI_THERMAL|THERMAL_OF|MODVERSIONS|MODULE_SIG|LOCALVERSION)' .config || true
-          grep -q '^CONFIG_THERMAL=y' .config || { echo "!! THERMAL 濞屸剝澧﹀鈧?; exit 1; }
-          grep -q '^CONFIG_SUNXI_THERMAL=y' .config || { echo "!! SUNXI_THERMAL 濞屸剝澧﹀鈧?; exit 1; }
+          grep -q '^CONFIG_THERMAL=y' .config || { echo "THERMAL not enabled"; exit 1; }
+          grep -q '^CONFIG_SUNXI_THERMAL=y' .config || { echo "SUNXI_THERMAL not enabled"; exit 1; }
 
-      - name: 缂傛牞鐦ч崘鍛壋娑撳氦顔曟径鍥ㄧ埐
+      - name: build-zImage
         run: |
           set -o pipefail
           export PATH="$GITHUB_WORKSPACE/tc/toolchain-sunxi-musl/toolchain/bin:$PATH"
@@ -74,20 +74,15 @@ jobs:
           export CROSS_COMPILE=arm-openwrt-linux-muslgnueabi-
           export STAGING_DIR="$GITHUB_WORKSPACE/tc/target"
           cd linux
-          # Allwinner 的 zImage 目标依赖 dtbs，但 dtbs 需要 board.dtb（本配置里没定义）；
-          # 我们不换设备树（温度节点已在相机现有 dtb 里），所以放个占位文件骗过 make。
           touch arch/arm/boot/dts/board.dtb
-          make -j"$(nproc)" zImage 2>&1 | tail -60
-          echo "===== 娴溠呭⒖ ====="
+          make -j"$(nproc)" zImage 2>&1 | tail -50
+          echo "===== artifact ====="
           ls -l arch/arm/boot/zImage
-          echo "===== vermagic 閺夈儲绨敍鍫濆敶閺嶅摜澧楅張顒婄礆====="
           cat include/config/kernel.release 2>/dev/null || true
-          strings arch/arm/boot/zImage | grep -m3 '5\.4\.61'
 
-      - name: 娑撳﹣绱堕崘鍛壋
+      - name: upload
         uses: actions/upload-artifact@v4
         with:
           name: t113-kernel-thermal
-          path: |
-            linux/arch/arm/boot/zImage
+          path: linux/arch/arm/boot/zImage
           if-no-files-found: warn
