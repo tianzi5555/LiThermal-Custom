@@ -1,17 +1,13 @@
-// 顶部状态条（精简版）
+// 顶部状态条（精简版 v2）
 //
-// 只显示两项：CPU 占用 + CPU 温度
-//   * 宽度自适应（LV_SIZE_CONTENT），不再拉宽
-//   * 高度 34px（≈4mm），一行，12px 小字
-//   * 位置：右上角
+// 只显示：CPU 温度 + CPU 占用
+//   * 透明度：LV_OPA_50（照抄原项目中心温度标签 src/ui/crosshairs.cpp 的样式）
+//   * 宽度：内容自适应，贴着文字，不留空
+//   * 文字全用 ASCII（避免缺字形显示成方框；温度用 C 表示摄氏度）
+//   * 位置：右上角；菜单展开 / 打开 SH 终端时隐藏
 //
-// 显隐：菜单展开时隐藏；打开 SH 终端时隐藏；其余常显。
-//
-// 性能说明（重要，之前卡顿的原因）：
-//   之前这里有「热成像模组状态」的 HTTP 轮询，它和相机温度共用同一条 httplib 连接
-//   和同一把锁，并且在和界面同一个线程里执行 -> 请求一慢界面就顿一下。
-//   已经去掉。现在这个定时器只做两件极轻的事：读 /proc/stat 求差、读一次温度文件。
-//   两个都是内存里的伪文件，开销 < 0.1ms，不会造成卡顿。
+// 性能：定时器只做两件极轻的事（读 /proc/stat 求差、读一次温度文件），
+//       都是内存伪文件，开销 < 0.1ms；且不再每秒 move_foreground（避免整层重绘）。
 
 #include "my_main.h"
 #include "statusBar.h"
@@ -19,19 +15,16 @@
 #include <stdio.h>
 #include <string.h>
 
-#define SB_H 34
-#define SB_OPA 204 // ≈80%
+#define SB_OPA LV_OPA_50
 
 static lv_obj_t *sb_box = NULL;
 static lv_obj_t *sb_l1 = NULL;
 static unsigned long long g_prev_total = 0, g_prev_idle = 0;
 
-// ---------------- CPU 占用 ----------------
 static int read_cpu_percent(void)
 {
     FILE *f = fopen("/proc/stat", "r");
-    if (!f)
-        return -1;
+    if (!f) return -1;
     char line[256];
     if (!fgets(line, sizeof(line), f)) { fclose(f); return -1; }
     fclose(f);
@@ -52,7 +45,6 @@ static int read_cpu_percent(void)
     return pct;
 }
 
-// ---------------- CPU 温度 ----------------
 static int read_cpu_temp_x10(void)
 {
     const char *paths[] = {
@@ -85,8 +77,6 @@ static void sb_update(lv_timer_t *t)
         if (!was_hidden) { lv_obj_add_flag(sb_box, LV_OBJ_FLAG_HIDDEN); was_hidden = true; }
         return;
     }
-    // 只在「从隐藏变显示」的那一刻才抬到最前：每秒都调 move_foreground 会触发整层重绘，
-    // 那正是画面偶尔一顿的来源之一。
     if (was_hidden)
     {
         lv_obj_clear_flag(sb_box, LV_OBJ_FLAG_HIDDEN);
@@ -100,9 +90,9 @@ static void sb_update(lv_timer_t *t)
     if (t10 <= -1000) snprintf(ts, sizeof(ts), "--");
     else              snprintf(ts, sizeof(ts), "%d.%d", t10 / 10, t10 % 10);
 
-    char l1[48];
-    if (cpu < 0) snprintf(l1, sizeof(l1), "CPU %s° --", ts);
-    else         snprintf(l1, sizeof(l1), "CPU %s° %d%%", ts, cpu);
+    char l1[40];
+    if (cpu < 0) snprintf(l1, sizeof(l1), "CPU %sC", ts);
+    else         snprintf(l1, sizeof(l1), "CPU %sC %d%%", ts, cpu);
     lv_label_set_text(sb_l1, l1);
 }
 
@@ -112,22 +102,23 @@ void ui_statusbar_create(void)
         return;
 
     sb_box = lv_obj_create(lv_layer_sys());
-    lv_obj_set_size(sb_box, LV_SIZE_CONTENT, SB_H);   // 宽度自适应，不再拉宽
+    lv_obj_set_size(sb_box, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
     lv_obj_align(sb_box, LV_ALIGN_TOP_RIGHT, -1, 0);
     lv_obj_clear_flag(sb_box, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_style_radius(sb_box, 2, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_radius(sb_box, 3, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_border_width(sb_box, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_pad_all(sb_box, 1, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_pad_left(sb_box, 3, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_pad_right(sb_box, 3, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_bg_color(sb_box, lv_color_hex(0x000000), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_pad_all(sb_box, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_pad_hor(sb_box, 3, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_pad_ver(sb_box, 2, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_color(sb_box, lv_color_black(), LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_bg_opa(sb_box, SB_OPA, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_flex_flow(sb_box, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(sb_box, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
     sb_l1 = lv_label_create(sb_box);
-    lv_obj_center(sb_l1);
-    lv_label_set_text(sb_l1, "CPU --° --");
+    lv_label_set_text(sb_l1, "CPU --C --");
     lv_obj_set_style_text_font(sb_l1, &ui_font_cn12, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_text_color(sb_l1, lv_color_hex(0xE8EEF4), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_color(sb_l1, lv_color_hex(0xFFFFFF), LV_PART_MAIN | LV_STATE_DEFAULT);
 
-    lv_timer_create(sb_update, 1000, NULL);
+    lv_timer_create(sb_update, 2000, NULL);
 }
