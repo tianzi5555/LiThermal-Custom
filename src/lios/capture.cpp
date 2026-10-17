@@ -1,14 +1,11 @@
 // LiOS 截图 / 录屏（加进桌面程序，非独立应用）
 //   截图：电源键 + 录像键（短按）→ /mnt/UDISK/Screenshots/SHOT_*.bmp
-//   录屏：电源键 + 菜单键（短按）→ 开始/停止 → /mnt/UDISK/Screenshots/REC_*.avi
+//   录屏：电源键 + 菜单键（短按）→ 开始/停止 → /mnt/UDISK/Screenshots/REC_<时间>/*.bmp
 // 帧来源：LVGL 的绘制缓冲 s_fb_buf（ARGB8888，320x240）
-// 录屏：libavcodec MJPEG 编码 + libavformat AVI 封装，10fps
+// 说明：工具链的 ffmpeg 是纯解码版（无编码器），所以录屏存 BMP 帧序列
+//      （文件管理器能逐帧查看；要合成视频可在电脑上用 ffmpeg 批量转）
 
 #include <lvgl.h>
-#include <libavcodec/avcodec.h>
-#include <libavformat/avformat.h>
-#include <libavutil/imgutils.h>
-#include <libswscale/swscale.h>
 
 #include <pthread.h>
 #include <stdio.h>
@@ -18,23 +15,20 @@
 #include <time.h>
 #include <unistd.h>
 
-#define CAP_W 320
-#define CAP_H 240
-#define CAP_FPS 10
+#define CAP_FPS 8
 
-// 由 main.cpp 提供
 extern lv_color_t *lios_fb_buf(void);
 extern uint32_t lios_fb_w(void);
 extern uint32_t lios_fb_h(void);
-extern void lios_lock_display(void);   // LOCKLV
-extern void lios_unlock_display(void); // UNLOCKLV
+extern void lios_lock_display(void);
+extern void lios_unlock_display(void);
 extern void lios_log(const char *fmt, ...);
 
 static const char *kDir = "/mnt/UDISK/Screenshots";
 
-static void ensure_dir(void)
+static void ensure_dir(const char *p)
 {
-    mkdir(kDir, 0755);
+    mkdir(p, 0755);
 }
 
 static void timestamp(char *out, size_t n)
@@ -49,7 +43,7 @@ static void timestamp(char *out, size_t n)
         snprintf(out, n, "%ld", (long)t);
 }
 
-// ---------------- 截图：ARGB8888 -> 24bit BGR BMP（bottom-up）
+// ARGB8888 -> 24bit BGR BMP（bottom-up）
 static void write_bmp(const lv_color_t *buf, uint32_t w, uint32_t h, const char *path)
 {
     size_t row_size = w * 3;
@@ -74,17 +68,16 @@ static void write_bmp(const lv_color_t *buf, uint32_t w, uint32_t h, const char 
         return;
     fwrite(header, 1, 54, f);
     unsigned char row[1024];
-    // BMP 是 bottom-up
     for (int32_t y = h - 1; y >= 0; y--)
     {
         const lv_color_t *src = buf + (size_t)y * w;
         size_t o = 0;
         for (uint32_t x = 0; x < w; x++)
         {
-            uint32_t c = src[x].full; // ARGB8888
-            row[o++] = (unsigned char)((c >> 0) & 0xFF);  // B
-            row[o++] = (unsigned char)((c >> 8) & 0xFF);  // G
-            row[o++] = (unsigned char)((c >> 16) & 0xFF); // R
+            uint32_t c = src[x].full;
+            row[o++] = (unsigned char)((c >> 0) & 0xFF);
+            row[o++] = (unsigned char)((c >> 8) & 0xFF);
+            row[o++] = (unsigned char)((c >> 16) & 0xFF);
         }
         fwrite(row, 1, row_size, f);
         if (pad)
@@ -94,12 +87,12 @@ static void write_bmp(const lv_color_t *buf, uint32_t w, uint32_t h, const char 
         }
     }
     fclose(f);
-    lios_log("截图已保存 %s", path);
 }
 
+// ---------------- 截图
 void lios_capture_screenshot(void)
 {
-    ensure_dir();
+    ensure_dir(kDir);
     lios_lock_display();
     uint32_t w = lios_fb_w(), h = lios_fb_h();
     lv_color_t *buf = lios_fb_buf();
@@ -117,102 +110,23 @@ void lios_capture_screenshot(void)
         timestamp(ts, sizeof(ts));
         snprintf(path, sizeof(path), "%s/SHOT_%s.bmp", kDir, ts);
         write_bmp(copy, w, h, path);
+        lios_log("截图已保存 %s", path);
         free(copy);
     }
     else
         lios_unlock_display();
 }
 
-// ---------------- 录屏：MJPEG -> AVI
+// ---------------- 录屏：BMP 帧序列
 static pthread_t s_rec_thread;
 static volatile bool s_rec_run = false;
 static volatile bool s_rec_done = false;
-static char s_rec_path[160];
+static char s_rec_dir[160];
 
 static void *rec_thread(void *)
 {
-    const char *path = s_rec_path;
-    unlink(path);
-
-    AVFormatContext *fmt = NULL;
-    avformat_alloc_output_context2(&fmt, NULL, "avi", path);
-    if (fmt == NULL)
-    {
-        lios_log("录屏：无法创建输出上下文");
-        s_rec_done = true;
-        return NULL;
-    }
-    const AVCodec *codec = avcodec_find_encoder(AV_CODEC_ID_MJPEG);
-    if (codec == NULL)
-    {
-        lios_log("录屏：没有 MJPEG 编码器");
-        s_rec_done = true;
-        return NULL;
-    }
-    AVStream *st = avformat_new_stream(fmt, NULL);
-    if (st == NULL)
-    {
-        s_rec_done = true;
-        return NULL;
-    }
-    AVCodecContext *cc = avcodec_alloc_context3(codec);
-    if (cc == NULL)
-    {
-        s_rec_done = true;
-        return NULL;
-    }
-    cc->width = CAP_W;
-    cc->height = CAP_H;
-    cc->time_base = (AVRational){1, CAP_FPS};
-    cc->pix_fmt = AV_PIX_FMT_YUVJ420P;
-    cc->codec_id = AV_CODEC_ID_MJPEG;
-    if (avcodec_open2(cc, codec, NULL) < 0)
-    {
-        lios_log("录屏：编码器打开失败");
-        s_rec_done = true;
-        return NULL;
-    }
-    avcodec_parameters_from_context(st->codecpar, cc);
-    st->time_base = cc->time_base;
-
-    if (avio_open(&fmt->pb, path, AVIO_FLAG_WRITE) < 0)
-    {
-        lios_log("录屏：打不开输出文件");
-        s_rec_done = true;
-        return NULL;
-    }
-    avformat_write_header(fmt, NULL);
-
-    struct SwsContext *sws = sws_getContext(CAP_W, CAP_H, AV_PIX_FMT_BGRA, CAP_W, CAP_H,
-                                            AV_PIX_FMT_YUVJ420P, SWS_BILINEAR, NULL, NULL, NULL);
-    if (sws == NULL)
-    {
-        s_rec_done = true;
-        return NULL;
-    }
-
-    AVFrame *frame = av_frame_alloc();
-    AVFrame *yuv = av_frame_alloc();
-    AVPacket pkt;
-    av_init_packet(&pkt);
-    pkt.data = NULL;
-    pkt.size = 0;
-
-    if (frame == NULL || yuv == NULL)
-    {
-        s_rec_done = true;
-        return NULL;
-    }
-    av_frame_make_writable(yuv);
-    yuv->format = AV_PIX_FMT_YUVJ420P;
-    yuv->width = CAP_W;
-    yuv->height = CAP_H;
-    if (av_frame_get_buffer(yuv, 32) < 0)
-    {
-        s_rec_done = true;
-        return NULL;
-    }
-
+    const char *dir = s_rec_dir;
+    ensure_dir(dir);
     uint32_t w = lios_fb_w(), h = lios_fb_h();
     lv_color_t *tmp = (lv_color_t *)malloc((size_t)w * h * sizeof(lv_color_t));
     if (tmp == NULL)
@@ -220,73 +134,46 @@ static void *rec_thread(void *)
         s_rec_done = true;
         return NULL;
     }
-
-    int64_t frame_no = 0;
+    long frame_no = 0;
     while (s_rec_run)
     {
-        // 抓帧（锁内拷贝）
         lios_lock_display();
         lv_color_t *buf = lios_fb_buf();
         if (buf != NULL)
             memcpy(tmp, buf, (size_t)w * h * sizeof(lv_color_t));
         lios_unlock_display();
 
-        uint8_t *src[4] = {(uint8_t *)tmp, NULL, NULL, NULL};
-        int src_linesize[4] = {(int)w * 4, 0, 0, 0};
-        sws_scale(sws, src, src_linesize, 0, h, yuv->data, yuv->linesize);
-        yuv->pts = frame_no++;
-
-        int got = 0;
-        if (avcodec_encode_video2(cc, &pkt, yuv, &got) == 0 && got)
-        {
-            pkt.stream_index = st->index;
-            av_interleaved_write_frame(fmt, &pkt);
-            av_packet_unref(&pkt);
-        }
+        char path[200];
+        snprintf(path, sizeof(path), "%s/F%05ld.bmp", dir, frame_no);
+        write_bmp(tmp, w, h, path);
+        frame_no++;
         usleep(1000000 / CAP_FPS);
     }
-    // 收尾：刷剩余帧
-    int got = 0;
-    if (avcodec_encode_video2(cc, &pkt, NULL, &got) == 0 && got)
-    {
-        pkt.stream_index = st->index;
-        av_interleaved_write_frame(fmt, &pkt);
-        av_packet_unref(&pkt);
-    }
-    av_write_trailer(fmt);
-
-    sws_freeContext(sws);
-    av_frame_free(&frame);
-    av_frame_free(&yuv);
-    avcodec_free_context(&cc);
-    avio_closep(&fmt->pb);
-    avformat_free_context(fmt);
     free(tmp);
-    lios_log("录屏已保存 %s（%lld 帧）", path, (long long)frame_no);
+    lios_log("录屏结束：%s 共 %ld 帧", dir, frame_no);
     s_rec_done = true;
     return NULL;
 }
 
-// 电源+菜单：开始/停止录屏
 void lios_capture_rec_toggle(void)
 {
-    ensure_dir();
+    ensure_dir(kDir);
     if (s_rec_run)
     {
-        s_rec_run = false; // 停止信号，线程自己收尾
+        s_rec_run = false;
         lios_log("录屏：请求停止");
     }
     else
     {
         char ts[32];
         timestamp(ts, sizeof(ts));
-        snprintf(s_rec_path, sizeof(s_rec_path), "%s/REC_%s.avi", kDir, ts);
+        snprintf(s_rec_dir, sizeof(s_rec_dir), "%s/REC_%s", kDir, ts);
         s_rec_run = true;
         s_rec_done = false;
         if (pthread_create(&s_rec_thread, NULL, rec_thread, NULL) == 0)
         {
             pthread_detach(s_rec_thread);
-            lios_log("录屏：开始 -> %s", s_rec_path);
+            lios_log("录屏：开始 -> %s", s_rec_dir);
         }
         else
         {
