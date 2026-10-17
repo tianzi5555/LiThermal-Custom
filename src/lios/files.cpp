@@ -572,6 +572,54 @@ static void card_show(const char *text, const char *const *btns, int n, void (*c
 
 // 展示脚本执行结果（可滚动）
 // 结果卡片打开时，由 tick 每帧调用：把监控线程最新写好的输出刷到 label。
+// 像手机终端那样解析原始字节流 -> 显示文本：
+//   1) 去掉 ANSI 转义序列（ESC [ ... @-~），隐藏光标等控制码不显示成乱码
+//   2) 每行内 \r 是"回到行首覆盖"：一行里只保留最后一个 \r 之后的内容
+//      （进度条一直 \r 覆盖，最终只显示最后一帧 —— 和手机端一致）
+static size_t sh_term_filter(const char *in, size_t n, char *out, size_t outmax)
+{
+    size_t o = 0;
+    for (size_t i = 0; i < n && o < outmax - 2; i++)
+    {
+        unsigned char c = (unsigned char)in[i];
+        if (c == 0x1b)
+        {
+            if (i + 1 < n && in[i + 1] == '[')
+            {
+                i += 2;
+                while (i < n && !((unsigned char)in[i] >= 0x40 && (unsigned char)in[i] <= 0x7e))
+                    i++;
+                continue;
+            }
+            continue;
+        }
+        out[o++] = (char)c;
+    }
+    out[o] = 0;
+
+    // \r 行内覆盖：逐行处理，每行只留最后一个 \r 之后的内容
+    size_t w = 0;
+    size_t start = 0;
+    for (size_t i = 0; i <= o; i++)
+    {
+        if (out[i] == '\n' || i == o)
+        {
+            size_t last_cr = start;
+            for (size_t k = start; k < i; k++)
+                if (out[k] == '\r')
+                    last_cr = k + 1;
+            for (size_t k = last_cr; k < i; k++)
+                if (out[k] != '\r')
+                    out[w++] = out[k];
+            if (i < o)
+                out[w++] = '\n';
+            start = i + 1;
+        }
+    }
+    out[w] = 0;
+    return w;
+}
+
 static void refresh_sh_live(void)
 {
     if (s_sh_label == NULL || !lv_obj_is_valid(s_sh_label))
