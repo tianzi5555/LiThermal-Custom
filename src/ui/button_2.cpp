@@ -163,10 +163,6 @@ void menu_system_hide();
 
 void refresh_menu_key()
 {
-    // LiOS 桌面的菜单键由 lios_launcher_poll() 处理（应用页/桌面都靠它返回上一级），
-    // 这里不能抢，也不要清事件
-    if (current_mode == MODE_LIOS)
-        return;
     if (crosshair_settings_is_open())
     {
         if (HAL::key_press_event[1] == true)

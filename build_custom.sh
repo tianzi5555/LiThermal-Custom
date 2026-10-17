@@ -30,7 +30,19 @@ make -j"$(nproc)"
 mkdir -p "$GITHUB_WORKSPACE/UDISK"
 cp "$ROOTPATH/build/LiThermal" "$GITHUB_WORKSPACE/UDISK"
 cp "$ROOTPATH/build/BSOD" "$GITHUB_WORKSPACE/UDISK"
-cp "$ROOTPATH/thermalcamera.sh" "$GITHUB_WORKSPACE/UDISK"
+# LiOS 桌面是独立程序（开机由 thermalcamera.sh 直接启动它，相机是桌面上一个方块）
+if [ -f "$ROOTPATH/build/lios" ]; then
+    cp "$ROOTPATH/build/lios" "$GITHUB_WORKSPACE/UDISK"
+else
+    echo "!! build/lios 不存在，桌面不会被打包（检查 CMakeLists 的 lios target）"
+    exit 1
+fi
+# 启动脚本：优先用本仓库根目录这份（编译器仓库里那份可能没同步）
+if [ -f "$SRC/thermalcamera.sh" ]; then
+    cp "$SRC/thermalcamera.sh" "$GITHUB_WORKSPACE/UDISK"
+else
+    cp "$ROOTPATH/thermalcamera.sh" "$GITHUB_WORKSPACE/UDISK"
+fi
 
 echo "===== UDISK contents ====="
 ls -la "$GITHUB_WORKSPACE/UDISK"

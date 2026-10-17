@@ -1,7 +1,6 @@
 #include "my_main.h"
 #include "uiTrace.h"
 #include "statusBar.h"
-#include "lios_launcher.h" // LiOS 桌面 + 相机双向切换
 #include "perfProbe.h" // 临时性能探针（诊断用，可删）
 #include <signal.h>
 #include <fcntl.h>
@@ -51,8 +50,7 @@ pthread_t thread_app;
 void *thread_app_func(void *)
 {
     static uint32_t last_color_palette = -1;
-    // LiOS 第二期：切到桌面时相机线程先待机（不读图不刷界面），回相机后自动恢复
-    while (cameraUtils.connected == false || lios_mode_active())
+    while (cameraUtils.connected == false)
         usleep(100000);
     sleep(1);
     // 关闭 4117 自带叠加，避免数码变焦把 OSD 放大/裁花
@@ -78,12 +76,6 @@ void *thread_app_func(void *)
         {
             last_color_palette = globalSettings.colorPalette;
             cameraUtils.setColorPalette(globalSettings.colorPalette);
-        }
-        // LiOS 第二期：桌面显示期间暂停相机 UI 刷新（回相机后循环自己继续）
-        if (lios_mode_active())
-        {
-            usleep(100000);
-            continue;
         }
         /* 注意：getTemperature() 已经不在这里同步调用了（搬到 thread_temp_poll_func）。
            原来每轮同步等一次 HTTP，实测 getTemp_avg≈97ms / max≈262ms，把这条本该 25Hz 的
@@ -120,16 +112,10 @@ void *thread_ui_func(void *)
 
 void *thread_center_temp_func(void *)
 {
-    // LiOS 第二期：桌面显示期间待机，回相机后继续（原逻辑一律不改）
-    while (cameraUtils.connected == false || lios_mode_active())
+    while (cameraUtils.connected == false)
         usleep(100000);
     while (1)
     {
-        if (lios_mode_active())
-        {
-            usleep(100000);
-            continue;
-        }
         /* --- perf probe: 中心温度线程每轮周期（含固定 sleep，用来确认周期真的对） --- */
         uint32_t perf_center_t0 = perf_probe_now_us();
 
@@ -172,16 +158,10 @@ void *thread_center_temp_func(void *)
 pthread_t thread_temp_poll;
 void *thread_temp_poll_func(void *)
 {
-    // LiOS 第二期：桌面显示期间待机，回相机后继续（原逻辑一律不改）
-    while (cameraUtils.connected == false || lios_mode_active())
+    while (cameraUtils.connected == false)
         usleep(100000);
     while (1)
     {
-        if (lios_mode_active())
-        {
-            usleep(100000);
-            continue;
-        }
         uint32_t t0 = perf_probe_now_us();
         if (current_mode == MODE_MAINPAGE || current_mode == MODE_CAMERA_SETTINGS)
         {
@@ -196,24 +176,19 @@ void *thread_temp_poll_func(void *)
     return NULL;
 }
 
-int main(int argc, char **argv)
+int main()
 {
-    (void)argc;
-    (void)argv;
-
     perf_probe_init(); // 临时性能探针：/tmp/perf.log，每 1 秒汇总一行（诊断用，可删）
     install_crash_handler();
     ui_trace_reset();
     sleep(1); // Why?
     system("mkdir " GALLERY_PATH);
     system("mkdir " GALLERY2_PATH);
+    // 递归互斥锁：lv_mutex 保护 LVGL，而 LVGL 的输入事件是在 lv_timer_handler() 内部
+    // 派发的（事件回调执行时本线程已持有这把锁）。万一某个回调里又写了 LOCKLV()，
+    // 非递归锁会立刻自锁死整机。用递归锁兜底更安全。
     pthread_mutexattr_t lv_mutex_attr;
     pthread_mutexattr_init(&lv_mutex_attr);
-    // 关键：用**递归**互斥锁。lv_mutex 保护的是 LVGL，而 LVGL 的输入事件是在
-    // lv_timer_handler() 内部派发的，事件回调执行时本线程已经持有这把锁；
-    // 如果哪天某个回调里又写了 LOCKLV()，非递归锁会立刻自锁死
-    // （表现：整机卡死、连电源键都没反应，只能断电 —— 第二期就踩过这个坑）。
-    // 设成递归锁之后，这种写法最多是多加一次引用计数，不会再锁死。
     pthread_mutexattr_settype(&lv_mutex_attr, PTHREAD_MUTEX_RECURSIVE);
     pthread_mutex_init(&lv_mutex, &lv_mutex_attr);
     pthread_mutexattr_destroy(&lv_mutex_attr);
@@ -222,21 +197,18 @@ int main(int argc, char **argv)
     lv_obj_clear_flag(lv_scr_act(), LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_clear_flag(lv_layer_top(), LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_clear_flag(lv_layer_sys(), LV_OBJ_FLAG_SCROLLABLE);
-
-    // ---- 启动就进相机 ----
-    // 密码界面已经彻底删掉了：现在 LiOS 桌面的唯一入口是相机里的隐藏 SH 终端
-    //（系统设置 → 手动清除噪声 → 录像键 → 右上角「进LiOS」）。
-    // enter_camera() 负责 waitboot 连接动画、各 UI 部件、相机线程（幂等）。
-    current_mode = MODE_MAINPAGE;
-    lios_autotest_start(); // 只有 /tmp/lios_autotest 存在时才真的跑（调试钩子）
-    enter_camera();
-
+    printf("Loop begin\n");
+    waitboot_scr_load(lv_scr_act());
+    widget_graph_create();
+    ui_crosshairs_create();
+    ui_center_display_create();
+    ui_statusbar_create(); // 顶部半透明状态条（CPU/内存）
+    pthread_create(&thread_ui, NULL, thread_ui_func, NULL);
+    cameraUtils.initHTTPClient();
+    pthread_create(&thread_app, NULL, thread_app_func, NULL);
+    pthread_create(&thread_temp_poll, NULL, thread_temp_poll_func, NULL); // 温度轮询独立线程
+    pthread_create(&thread_center_temp, NULL, thread_center_temp_func, NULL);
     void *result;
-    // LiOS 桌面的 UI 线程可能是 launcher 线程建的，等它建出来再 join。
-    // （直接 pthread_join(thread_ui) 有 join 到 0 的风险，那是未定义行为、实测会崩）
-    while (!lios_camera_ready())
-        usleep(20000);
-    if (thread_ui != 0)
-        pthread_join(thread_ui, &result);
+    pthread_join(thread_ui, &result);
     return 0;
 }

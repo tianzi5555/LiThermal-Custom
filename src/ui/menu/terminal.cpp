@@ -13,7 +13,6 @@
 #include "my_main.h"
 #include "uiKeyboard.h"
 #include "uiTrace.h"
-#include "lios_launcher.h" // LiOS 第二期：从相机切到 LiOS 桌面
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -166,16 +165,22 @@ static void btn_clear_logs_cb(lv_event_t *e)
             "echo \"可用 ${b}KB -> ${a}KB\"");
 }
 
-// LiOS 第二期：切到 LiOS 桌面
-// 注意：这里只关掉终端卡片，真正的模式切换交给 launcher 线程
-//（它会把相机界面盖住；从桌面回相机时相机线程会自己待机/恢复）。
+// 进 LiOS：写标记文件后**退出相机进程**，由 /mnt/UDISK/thermalcamera.sh 接手启动 /mnt/UDISK/lios。
+// 这样两个程序是平级的独立进程，互不影响，也不会有模式切换/锁的问题。
 static void btn_lios_cb(lv_event_t *e)
 {
     (void)e;
-    ui_trace("terminal: 按「进LiOS」 -> lios_enter()");
-    menu_terminal_hide();
-    current_mode = MODE_LIOS;
-    lios_enter();
+    ui_trace("terminal: 按「进LiOS」-> 写 /tmp/lios_mode=lios 并退出相机进程");
+    FILE *f = fopen("/tmp/lios_mode", "w");
+    if (f != NULL)
+    {
+        fputs("lios", f);
+        fclose(f);
+    }
+    settings_save();          // 先把相机设置落盘（和正常退出一样）
+    videoPlayer.disconnect(); // 断开 RTSP，把显示/网络让给 lios
+    sync();
+    _exit(0); // 退出码 0：启动脚本会看到 lios 标记并去跑 lios
 }
 
 // ---------------------------------------------------------------- 页面

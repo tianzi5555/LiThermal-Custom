@@ -71,7 +71,6 @@ static void sb_update(lv_timer_t *t)
         return;
 
     static bool was_hidden = false;
-    // 菜单展开/终端时隐藏；LiOS 桌面要保留（右上角状态条沿用）
     bool hide = (current_mode == MODE_MAINMENU) || menu_terminal_is_open();
     if (hide)
     {

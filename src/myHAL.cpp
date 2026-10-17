@@ -1,6 +1,5 @@
 #include "myHAL.h"
 #include "uiTrace.h"
-#include "lios_launcher.h" // LiOS 第二期：桌面的滚轮/按键转发
 #include "perfProbe.h" // 临时性能探针（诊断用，可删）
 #include "lv_drivers/display/sunxifb.h"
 #include <unistd.h>
@@ -103,13 +102,7 @@ static void *thread_refreshEncoder(void *)
 // LVGL编码器读取
 static void encoder_read(lv_indev_drv_t *drv, lv_indev_data_t *data)
 {
-    // LiOS：有应用占屏时滚轮要转发给应用（lios_launcher_poll 里读 last_encoder_direction），
-    // 所以不能同时让 LVGL 拿去走焦点
-    if (lios_launcher_app_active())
-        data->enc_diff = 0;
-    // 主界面/相册里滚轮另有用途（数码变焦、亮度和翻页），不交给 LVGL；
-    // 其它模式（含 LiOS 桌面）都交给 LVGL 走焦点。
-    else if (current_mode != MODE_MAINPAGE && current_mode != MODE_GALLERY)
+    if (current_mode != MODE_MAINPAGE && current_mode != MODE_GALLERY)
         data->enc_diff = encoder_new_move;
     else
         data->enc_diff = 0;
@@ -179,13 +172,7 @@ void *thread_hal_func(void *)
             PowerManager_powerOff();
         }
 
-        if (current_mode == MODE_LIOS)
-        {
-            // LiOS 桌面/应用：滚轮和按键交给 launcher
-            //（它负责「应用页 菜单/录像/确认 → 回桌面」和「桌面 菜单键 → 回相机」）
-            lios_launcher_poll();
-        }
-        else if (current_mode == MODE_MAINPAGE)
+        if (current_mode == MODE_MAINPAGE)
         {
             if (last_encoder_direction != 0)
             {
@@ -320,8 +307,6 @@ void HAL::lv_loop()
     {
         /* --- perf probe: lv_task_handler 全程（含抢 lv_mutex，能看出被别的线程顶住多久） --- */
         uint32_t perf_lv_t0 = perf_probe_now_us();
-        // LiOS 看门狗心跳：UI 线程每转一圈 +1（不依赖 LVGL 定时器，纯计数器最可靠）
-        lios_ui_beat();
         LOCKLV();
         lv_task_handler();
         UNLOCKLV();
