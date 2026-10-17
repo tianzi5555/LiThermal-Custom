@@ -20,6 +20,12 @@
 #include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <stdint.h>
+// sunxi_display2.h 需要这些类型先定义（相机 Backlight.cpp 里也是这么写的）
+typedef uint32_t u32;
+typedef int32_t s32;
+typedef uint16_t u16;
+typedef uint8_t u8;
 #include <sunxi_display2.h>
 
 #define MAX_ROWS 10
