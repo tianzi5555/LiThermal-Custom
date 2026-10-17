@@ -77,6 +77,20 @@ void lios_key_flush(void)
     s_enc_diff = 0;
 }
 
+// 滚轮差值：正 = 下/右。只有 UI 线程会取（LVGL 的 indev read_cb 或桌面 tick），
+// 二者互斥：indev 开着时由 read_cb 取走，关着时由桌面 tick 取走。
+int lios_enc_take(void)
+{
+    int d = s_enc_diff;
+    s_enc_diff = 0;
+    return d;
+}
+
+bool lios_enc_pressed(void)
+{
+    return s_enc_pressed;
+}
+
 // ---------------------------------------------------------------- 相机子进程
 
 static volatile bool s_child_running = false;
@@ -317,9 +331,8 @@ static int lios_display_init(void)
 static void lios_encoder_read(lv_indev_drv_t *drv, lv_indev_data_t *data)
 {
     (void)drv;
-    data->enc_diff = s_enc_diff;
-    s_enc_diff = 0;
-    data->state = s_enc_pressed ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
+    data->enc_diff = (int16_t)lios_enc_take();
+    data->state = lios_enc_pressed() ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
 }
 
 static void lios_indev_init(void)
@@ -428,6 +441,9 @@ int main(void)
     lios_indev_init();
 
     PowerManager_init(); // 只为长按电源键关机（复用相机那份串口实现）
+
+    // 扫描 /mnt/UDISK/apps/*.so 与 /mnt/UDISK/*.so（后台线程做，UI 线程绝不做 I/O）
+    lios_apps_scan_start();
 
     pthread_t t;
     if (pthread_create(&t, NULL, lios_thread_encoder, NULL) == 0)

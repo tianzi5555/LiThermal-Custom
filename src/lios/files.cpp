@@ -14,6 +14,7 @@
 
 #include "lios.h"
 #include "ui_kb.h"
+#include "viewer.h" // 图片/视频/文本查看器（点文件 = 真打开）
 
 #include <dirent.h>
 #include <errno.h>
@@ -40,6 +41,7 @@ typedef struct
     char name[NAME_MAX_LEN];
     bool is_dir;
     unsigned long long size;
+    char mtime[24]; // 修改时间（worker 里格式化好，UI 直接用 → 回调里不做 I/O）
 } fe_t;
 
 enum
@@ -79,10 +81,12 @@ static int s_sel = 0;
 static char s_names[MAX_ROWS][NAME_MAX_LEN];
 static bool s_isdir[MAX_ROWS];
 static unsigned long long s_size[MAX_ROWS];
+static char s_mtime[MAX_ROWS][24];
 
 static void ui_scan(const char *path);
 static void ui_build_rows(void);
 static void card_close(void);
+static void update_list_hint(void);
 static void (*s_card_cb)(int) = NULL;
 
 // ---------------------------------------------------------------- worker
@@ -126,6 +130,15 @@ static void worker_scan(const char *path)
             snprintf(arr[n].name, sizeof(arr[n].name), "%s", e->d_name);
             arr[n].is_dir = S_ISDIR(st.st_mode);
             arr[n].size = (unsigned long long)st.st_size;
+            arr[n].mtime[0] = 0;
+            if (S_ISREG(st.st_mode))
+            {
+                // 时间格式化放 worker 线程（UI 的 LVGL 回调里绝不做这类可能读文件的调用）
+                struct tm tmv;
+                memset(&tmv, 0, sizeof(tmv));
+                if (localtime_r(&st.st_mtime, &tmv) != NULL)
+                    strftime(arr[n].mtime, sizeof(arr[n].mtime), "%Y-%m-%d %H:%M", &tmv);
+            }
             n++;
         }
         closedir(d);
@@ -247,6 +260,17 @@ static void set_hint(const char *s)
         lv_label_set_text(s_hint, s);
 }
 
+// 列表的标准提示行（从查看器返回时用它恢复）
+static void update_list_hint(void)
+{
+    char hint[220];
+    if (s_count > MAX_ROWS)
+        snprintf(hint, sizeof(hint), "共 %d 项，仅显示前 %d 项", s_count, MAX_ROWS);
+    else
+        snprintf(hint, sizeof(hint), "共 %d 项   菜单=上级  录像=操作", s_count);
+    set_hint(hint);
+}
+
 // ---------------------------------------------------------------- 卡片
 static void card_btn_cb(lv_event_t *e)
 {
@@ -281,8 +305,15 @@ static void card_show(const char *text, const char *const *btns, int n, void (*c
     card_close();
     s_card_cb = cb;
 
+    // 多行文字要留够高度（信息卡片现在有名字/大小/修改时间三行）
+    int lines = 1;
+    for (const char *p = text; p != NULL && *p != 0; p++)
+        if (*p == '\n')
+            lines++;
+    int extra = (lines > 2) ? (lines - 2) * 14 : 0;
+
     s_card = lv_obj_create(lv_scr_act());
-    lv_obj_set_size(s_card, 252, 52 + n * 30);
+    lv_obj_set_size(s_card, 252, 52 + extra + n * 30);
     lv_obj_center(s_card);
     lv_obj_clear_flag(s_card, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_radius(s_card, 8, LV_PART_MAIN | LV_STATE_DEFAULT);
@@ -422,6 +453,31 @@ static void go_parent(void)
     ui_scan(up);
 }
 
+// 点文件：按类型真打开（图片/视频/文本 -> 查看器；其它 -> 信息卡片）
+static void open_file(int idx)
+{
+    char full[PATH_MAX_LEN + NAME_MAX_LEN + 2];
+    snprintf(full, sizeof(full), "%s/%s", s_cwd, s_names[idx]);
+
+    int kind = viewer_kind_of(s_names[idx], s_size[idx]);
+    if (kind == VIEW_IMAGE || kind == VIEW_VIDEO || kind == VIEW_TEXT)
+    {
+        lios_log("文件管理：打开文件 %s（kind=%d）", full, kind);
+        viewer_open(s_page, full, kind); // 失败也是查看器里显示一行错误 + 菜单返回
+        set_hint("菜单键 返回列表");
+        return;
+    }
+
+    // 其它类型：还是「信息卡片」，这次补上修改时间
+    char sz[24], msg[300];
+    human_size(s_size[idx], sz, sizeof(sz));
+    snprintf(msg, sizeof(msg), "%s\n大小：%s\n修改时间：%s",
+             s_names[idx], sz, (s_mtime[idx][0] != 0) ? s_mtime[idx] : "未知");
+    const char *btns[] = {"知道了"};
+    card_show(msg, btns, 1, NULL);
+    lios_log("文件管理：信息卡片 %s（%s）", full, sz);
+}
+
 static void row_click_cb(lv_event_t *e)
 {
     lv_obj_t *row = lv_event_get_target(e);
@@ -445,11 +501,7 @@ static void row_click_cb(lv_event_t *e)
     }
     else
     {
-        char sz[24], msg[260];
-        human_size(s_size[idx], sz, sizeof(sz));
-        snprintf(msg, sizeof(msg), "%s\n大小：%s", s_names[idx], sz);
-        const char *btns[] = {"知道了"};
-        card_show(msg, btns, 1, NULL);
+        open_file(idx);
     }
 }
 
@@ -516,6 +568,7 @@ static void ui_build_rows(void)
             snprintf(s_names[i], sizeof(s_names[i]), "%s", res[i].name);
             s_isdir[i] = res[i].is_dir;
             s_size[i] = res[i].size;
+            snprintf(s_mtime[i], sizeof(s_mtime[i]), "%s", res[i].mtime);
 
             char text[320];
             if (strcmp(res[i].name, "..") == 0)
@@ -571,6 +624,14 @@ static void ui_scan(const char *path)
 // ---------------------------------------------------------------- 钩子
 static bool page_key(int key)
 {
+    // 查看器开着：按键先给它（菜单键 = 退出查看器，回原来那个目录的列表）
+    if (viewer_is_open())
+    {
+        if (key == LIOS_K_MENU || key == LIOS_K_REC || key == LIOS_K_ENTER)
+            return viewer_key(key);
+        return false;
+    }
+
     if (key == LIOS_K_MENU)
     {
         if (s_card != NULL || s_kb != NULL)
@@ -611,6 +672,21 @@ static bool page_key(int key)
 
 static void page_tick(void)
 {
+    // 查看器开着：这帧只伺候查看器（取解码结果、blit）；它自己关了就恢复列表
+    if (viewer_is_open())
+    {
+        viewer_tick();
+        if (!viewer_is_open())
+        {
+            update_list_hint();
+            if (s_shown > 0 && s_rows[(s_sel >= 0 && s_sel < s_shown) ? s_sel : 0] != NULL &&
+                lv_obj_is_valid(s_rows[s_sel]))
+                lv_group_focus_obj(s_rows[s_sel]);
+            lios_log("文件管理：从查看器返回，仍在 %s", s_cwd);
+        }
+        return;
+    }
+
     bool have = false, dirty = false;
     char cur[160];
     pthread_mutex_lock(&s_mtx);
@@ -636,8 +712,19 @@ static void page_tick(void)
     }
 }
 
+// 页面自己收滚轮（查看器里滚文本；桌面只在 !wheel_focus 时才回调这里）
+static void page_wheel(int diff)
+{
+    if (viewer_is_open())
+        viewer_wheel(diff);
+}
+
 static void page_destroy(void)
 {
+    // 关键：退出文件管理器时若查看器还开着，必须停了它的解码线程并释放缓冲
+    if (viewer_is_open())
+        viewer_close();
+
     s_page = NULL;
     s_path_lbl = NULL;
     s_list = NULL;
@@ -653,7 +740,7 @@ static void page_destroy(void)
     s_count = 0;
 }
 
-static const lios_page_hooks_t s_hooks = {page_key, page_tick, page_destroy};
+static const lios_page_hooks_t s_hooks = {page_key, page_tick, page_destroy, page_wheel};
 
 // ---------------------------------------------------------------- 入口
 void page_files_create(lv_obj_t *parent)

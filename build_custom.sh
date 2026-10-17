@@ -44,5 +44,37 @@ else
     cp "$ROOTPATH/thermalcamera.sh" "$GITHUB_WORKSPACE/UDISK"
 fi
 
+# ---- 插件 .so（弹球 / 俄罗斯方块）：打进 UDISK/apps，部署时放到 /mnt/UDISK/apps/ ----
+mkdir -p "$GITHUB_WORKSPACE/UDISK/apps"
+for plug in ball tetris; do
+    if [ -f "$ROOTPATH/build/$plug.so" ]; then
+        cp "$ROOTPATH/build/$plug.so" "$GITHUB_WORKSPACE/UDISK/apps/"
+    else
+        echo "!! build/$plug.so 不存在（检查 CMakeLists 里的插件 target）"
+        exit 1
+    fi
+done
+
+# ---- 插件符号自检：插件里用到的 lv_* / ui_font_* / lios_* 必须都能从 lios 解析到 ----
+# 插件不链 lvgl（避免两份 LVGL 状态），全靠主程序 -rdynamic 导出。
+# 少了符号的话 dlopen(RTLD_NOW) 会失败、插件在桌面上直接消失 —— 所以这里提前拦下来。
+NM="$ROOTPATH/toolchain-sunxi-musl/toolchain/bin/arm-openwrt-linux-nm"
+if [ -x "$NM" ]; then
+    "$NM" -D --defined-only "$ROOTPATH/build/lios" | awk '{print $NF}' | sort -u > /tmp/lios_defined.txt
+    for plug in ball tetris; do
+        "$NM" -D --undefined-only "$ROOTPATH/build/$plug.so" | awk '{print $NF}' \
+            | grep -E '^(lv_|ui_font_|lios_)' | sort -u > "/tmp/need_$plug.txt" || true
+        MISSING=$(comm -23 "/tmp/need_$plug.txt" /tmp/lios_defined.txt || true)
+        if [ -n "$MISSING" ]; then
+            echo "!! $plug.so 里这些符号在 lios 里找不到（dlopen 会失败）："
+            echo "$MISSING"
+            exit 1
+        fi
+        echo "OK $plug.so：$(wc -l < /tmp/need_$plug.txt) 个 lv_/ui_font_/lios_ 符号全部能从 lios 解析"
+    done
+else
+    echo "!! 没找到 $NM，跳过插件符号自检"
+fi
+
 echo "===== UDISK contents ====="
-ls -la "$GITHUB_WORKSPACE/UDISK"
+ls -la "$GITHUB_WORKSPACE/UDISK" "$GITHUB_WORKSPACE/UDISK/apps"

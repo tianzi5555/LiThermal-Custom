@@ -67,3 +67,21 @@ target_link_libraries(lios lvgl lv_drivers uapi avcodec avdevice avformat avfilt
 # 插件 .so 要能解析到 lios 里的 LVGL / lios_log 符号 → 必须导出动态符号表
 # （-rdynamic / -Wl,--export-dynamic）。用 CMAKE_EXE_LINKER_FLAGS 兼容老版本 cmake。
 SET(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -rdynamic")
+
+# ---------------------------------------------------------------- 插件应用（.so，给 lios dlopen）
+# 弹球 / 俄罗斯方块：源码是现成的（src/apps/*.cpp），编成 .so 放进 /mnt/UDISK/apps/。
+# 关键：插件**不链 lvgl**（否则会有两份 LVGL 全局状态：插件里 lv_timer_create 建的
+# 定时器登记到自己那份 lv_global 里，主程序的 lv_task_handler 永远跑不到它）。
+# 插件里的 lv_* / ui_font_cn16 / lios_log 全部在 dlopen 时从主程序（-rdynamic）解析。
+# build_custom.sh 里有一条自检：插件用到但 lios 没导出的符号会让 CI 直接失败。
+add_library(ball SHARED src/apps/ball.cpp)
+add_library(tetris SHARED src/apps/tetris.cpp)
+foreach(plug ball tetris)
+  set_target_properties(${plug} PROPERTIES PREFIX "" OUTPUT_NAME "${plug}")
+  target_include_directories(${plug} PUBLIC ${PROJECT_SOURCE_DIR})
+  target_include_directories(${plug} PUBLIC include)
+  target_include_directories(${plug} PUBLIC linux_include)
+  target_include_directories(${plug} PUBLIC libs)
+  target_include_directories(${plug} PUBLIC libs/lvgl)
+  target_include_directories(${plug} PUBLIC libs/lv_drivers)
+endforeach()
