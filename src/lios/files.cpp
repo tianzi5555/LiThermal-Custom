@@ -69,8 +69,14 @@ static bool s_status_dirty = false;
 // 执行 .sh 脚本的输出（worker 写，UI 读）
 #define SH_OUT_MAX 4000
 static char s_sh_out[SH_OUT_MAX];
-static bool s_sh_ready = false;
+static bool s_sh_ready = false;   // 结果卡片是否该显示（执行一开始就 true）
+static bool s_sh_running = false; // 脚本还在跑
+static bool s_sh_done = false;    // 脚本结束（正常/超时都算）
+static int s_sh_exit = -1;        // 退出码（超时= -2）
+static long s_sh_pos = 0;         // 已读到输出的字节位置
 static char s_sh_name[NAME_MAX_LEN];
+static lv_obj_t *s_sh_label = NULL;   // 结果卡片里的输出 label（tick 刷新用）
+static lv_obj_t *s_sh_card = NULL;    // 结果卡片容器
 
 // ---------------------------------------------------------------- UI 状态
 static lv_obj_t *s_page = NULL;
@@ -168,15 +174,20 @@ static void worker_scan(const char *path)
 }
 
 // 执行 .sh 脚本：输出重定向到 /tmp（不写 SD 卡），带 15 秒超时
-static void worker_run_sh(const char *path, const char *arg)
+// 监控线程：fork 脚本 -> 边等边把 /tmp/files_sh.out 的新内容追加到 s_sh_out
+//（UI 的 tick 会定期把 s_sh_out 刷到结果卡片 label —— 这就是"实时输出"）
+static void *sh_monitor(void *arg)
 {
+    char **pp = (char **)arg;
+    const char *path = pp[0];
+    const char *arg2 = pp[1];
     const char *outf = "/tmp/files_sh.out";
-    unlink(outf);
+
     char cmd[PATH_MAX_LEN + 96];
-    if (arg != NULL && strcmp(arg, "cat") == 0)
-        snprintf(cmd, sizeof(cmd), "cat '%s' > %s 2>&1", path, outf); // 只看内容，不执行
+    if (arg2 != NULL && strcmp(arg2, "cat") == 0)
+        snprintf(cmd, sizeof(cmd), "cat '%s' > %s 2>&1", path, outf);
     else
-        snprintf(cmd, sizeof(cmd), "(sh '%s') > %s 2>&1", path, outf); // 用 sh 执行脚本
+        snprintf(cmd, sizeof(cmd), "(sh '%s') > %s 2>&1", path, outf);
 
     pid_t pid = fork();
     if (pid == 0)
@@ -184,41 +195,141 @@ static void worker_run_sh(const char *path, const char *arg)
         execl("/bin/sh", "sh", "-c", cmd, (char *)NULL);
         _exit(127);
     }
+
     int st = 0, waited = 0;
+    bool timeout = false;
     if (pid > 0)
     {
         while (waited < 15000)
         {
+            // 读文件新内容（脚本边写边读）
+            FILE *f = fopen(outf, "r");
+            if (f != NULL)
+            {
+                long sz = 0;
+                fseek(f, 0, SEEK_END);
+                sz = ftell(f);
+                if (sz > s_sh_pos)
+                {
+                    fseek(f, s_sh_pos, SEEK_SET);
+                    long want = sz - s_sh_pos;
+                    if (want > SH_OUT_MAX - 256)
+                        want = SH_OUT_MAX - 256;
+                    char buf[SH_OUT_MAX];
+                    size_t got = fread(buf, 1, (size_t)want, f);
+                    buf[got] = 0;
+                    pthread_mutex_lock(&s_mtx);
+                    size_t cur = strlen(s_sh_out);
+                    if (cur + got + 1 < SH_OUT_MAX)
+                    {
+                        memcpy(s_sh_out + cur, buf, got + 1);
+                        s_sh_pos += (long)got;
+                    }
+                    pthread_mutex_unlock(&s_mtx);
+                }
+                fclose(f);
+            }
             if (waitpid(pid, &st, WNOHANG) == pid)
                 break;
-            usleep(100000);
-            waited += 100;
+            usleep(120000);
+            waited += 120;
         }
         if (waited >= 15000)
         {
             kill(pid, SIGKILL);
             waitpid(pid, NULL, 0);
+            timeout = true;
         }
     }
 
+    // 收尾：再读一次剩余输出 + 打结束标记
+    pthread_mutex_lock(&s_mtx);
+    {
+        FILE *f = fopen(outf, "r");
+        if (f != NULL)
+        {
+            fseek(f, 0, SEEK_END);
+            long sz = ftell(f);
+            if (sz > s_sh_pos)
+            {
+                fseek(f, s_sh_pos, SEEK_SET);
+                long want = sz - s_sh_pos;
+                if (want > SH_OUT_MAX - 256)
+                    want = SH_OUT_MAX - 256;
+                char buf[SH_OUT_MAX];
+                size_t got = fread(buf, 1, (size_t)want, f);
+                buf[got] = 0;
+                size_t cur = strlen(s_sh_out);
+                if (cur + got + 1 < SH_OUT_MAX)
+                {
+                    memcpy(s_sh_out + cur, buf, got + 1);
+                    s_sh_pos += (long)got;
+                }
+            }
+            fclose(f);
+        }
+        if (s_sh_out[0] == 0)
+            snprintf(s_sh_out, SH_OUT_MAX, "(脚本无输出)");
+        char tail[96];
+        if (timeout)
+            snprintf(tail, sizeof(tail), "\n[超时 15 秒，已强制结束]");
+        else if (WIFEXITED(st))
+            snprintf(tail, sizeof(tail), "\n[结束，退出码 %d]", WEXITSTATUS(st));
+        else
+            snprintf(tail, sizeof(tail), "\n[被信号终止]");
+        size_t cur = strlen(s_sh_out);
+        if (cur + strlen(tail) + 1 < SH_OUT_MAX)
+            strcat(s_sh_out, tail);
+        s_sh_running = false;
+        s_sh_done = true;
+        s_sh_exit = timeout ? -2 : (WIFEXITED(st) ? WEXITSTATUS(st) : -1);
+        snprintf(s_status, sizeof(s_status), "脚本%s", timeout ? "超时结束" : "执行完成");
+        s_status_dirty = true;
+        s_busy = false;
+    }
+    pthread_mutex_unlock(&s_mtx);
+
+    free(pp[0]);
+    free(pp[1]);
+    free(pp);
+    return NULL;
+}
+
+// 启动执行：立即弹结果卡片（显示"运行中"），监控线程负责边跑边补输出
+static void worker_start_sh(const char *path, const char *arg)
+{
+    unlink("/tmp/files_sh.out");
     pthread_mutex_lock(&s_mtx);
     s_sh_out[0] = 0;
-    FILE *f = fopen(outf, "r");
-    if (f != NULL)
-    {
-        size_t got = fread(s_sh_out, 1, SH_OUT_MAX - 1, f);
-        s_sh_out[got] = 0;
-        fclose(f);
-    }
-    if (s_sh_out[0] == 0)
-        snprintf(s_sh_out, SH_OUT_MAX, "(脚本无输出)");
-    if (waited >= 15000)
-        strncat(s_sh_out, "\n[超时 15 秒，已强制结束]", SH_OUT_MAX - strlen(s_sh_out) - 1);
-    snprintf(s_status, sizeof(s_status), "脚本执行完成");
-    s_status_dirty = true;
-    s_sh_ready = true;
-    s_busy = false;
+    s_sh_pos = 0;
+    s_sh_running = true;
+    s_sh_done = false;
+    s_sh_exit = -1;
+    s_busy = true;
+    s_sh_ready = true; // 卡片马上显示
     pthread_mutex_unlock(&s_mtx);
+
+    char **pp = (char **)malloc(2 * sizeof(char *));
+    if (pp == NULL)
+        return;
+    pp[0] = strdup(path);
+    pp[1] = arg != NULL ? strdup(arg) : NULL;
+
+    pthread_t t;
+    if (pthread_create(&t, NULL, sh_monitor, pp) == 0)
+        pthread_detach(t);
+    else
+    {
+        free(pp[0]);
+        free(pp[1]);
+        free(pp);
+        pthread_mutex_lock(&s_mtx);
+        snprintf(s_sh_out, SH_OUT_MAX, "(无法启动执行线程)");
+        s_sh_running = false;
+        s_sh_done = true;
+        s_busy = false;
+        pthread_mutex_unlock(&s_mtx);
+    }
 }
 
 static void worker_op(int req, const char *path, const char *arg)
@@ -233,7 +344,7 @@ static void worker_op(int req, const char *path, const char *arg)
     }
     else if (req == REQ_RUNSH)
     {
-        worker_run_sh(path, arg); // 自己管理 s_busy/s_status，直接返回
+        worker_start_sh(path, arg); // 立即返回（实时输出由监控线程边跑边补）
         return;
     }
     else if (req == REQ_RENAME)
@@ -439,6 +550,19 @@ static void card_show(const char *text, const char *const *btns, int n, void (*c
 }
 
 // 展示脚本执行结果（可滚动）
+// 结果卡片打开时，由 tick 每帧调用：把监控线程最新写好的输出刷到 label。
+static void refresh_sh_live(void)
+{
+    if (s_sh_label == NULL || !lv_obj_is_valid(s_sh_label))
+        return;
+    pthread_mutex_lock(&s_mtx);
+    char out[SH_OUT_MAX];
+    snprintf(out, sizeof(out), "%s", s_sh_out);
+    pthread_mutex_unlock(&s_mtx);
+    if (strcmp(out, lv_label_get_text(s_sh_label)) != 0)
+        lv_label_set_text(s_sh_label, out);
+}
+
 static void show_sh_result(void)
 {
     pthread_mutex_lock(&s_mtx);
@@ -449,6 +573,7 @@ static void show_sh_result(void)
 
     card_close();
     s_card = lv_obj_create(lv_scr_act());
+    s_sh_card = s_card;
     lv_obj_set_size(s_card, 312, 226);
     lv_obj_align(s_card, LV_ALIGN_TOP_MID, 0, 4);
     lv_obj_set_style_radius(s_card, 6, LV_PART_MAIN | LV_STATE_DEFAULT);
@@ -463,7 +588,7 @@ static void show_sh_result(void)
     lv_obj_t *title = lv_label_create(s_card);
     lv_obj_set_style_text_font(title, &ui_font_cn12, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_text_color(title, lv_color_hex(0x9AD7FF), LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_label_set_text(title, "脚本执行结果（菜单键关闭）");
+    lv_label_set_text(title, "脚本输出（菜单键关闭）");
     lv_obj_set_pos(title, 2, 2);
 
     lv_obj_t *box = lv_obj_create(s_card);
@@ -477,12 +602,12 @@ static void show_sh_result(void)
     lv_obj_set_style_border_color(box, lv_color_hex(0x1E2A36), LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_pad_all(box, 3, LV_PART_MAIN | LV_STATE_DEFAULT);
 
-    lv_obj_t *lab = lv_label_create(box);
-    lv_obj_set_width(lab, 288);
-    lv_label_set_long_mode(lab, LV_LABEL_LONG_WRAP);
-    lv_obj_set_style_text_font(lab, &ui_font_cn12, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_text_color(lab, lv_color_hex(0xD8E2EA), LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_label_set_text(lab, out);
+    s_sh_label = lv_label_create(box);
+    lv_obj_set_width(s_sh_label, 288);
+    lv_label_set_long_mode(s_sh_label, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_font(s_sh_label, &ui_font_cn12, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_color(s_sh_label, lv_color_hex(0xD8E2EA), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_label_set_text(s_sh_label, out);
     s_card_cb = NULL;
     for (int i = 0; i < MAX_ROWS; i++)
         if (s_rows[i] != NULL && lv_obj_is_valid(s_rows[i]))
@@ -862,13 +987,20 @@ static void page_tick(void)
     if (have)
         ui_build_rows();
 
-    // 脚本执行完成 → 弹结果卡片
-    bool sh_ready = false;
+    // 脚本输出实时显示：卡片开着就一直刷新；没开则执行开始时弹卡片
+    bool sh_ready = false, sh_done = false;
     pthread_mutex_lock(&s_mtx);
     sh_ready = s_sh_ready;
+    sh_done = s_sh_done;
     pthread_mutex_unlock(&s_mtx);
     if (sh_ready)
-        show_sh_result();
+    {
+        if (s_sh_card == NULL || !lv_obj_is_valid(s_sh_card))
+            show_sh_result(); // 第一次：建卡片
+        refresh_sh_live();    // 之后每帧刷新文本 = 实时输出
+        // 结束后再等一秒才允许关，避免用户没看清最后几行
+        (void)sh_done;
+    }
 
     if (dirty)
     {
