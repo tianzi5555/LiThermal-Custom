@@ -683,6 +683,7 @@ static void show_sh_result(void)
     lv_obj_set_pos(box, 2, 20);
     lv_obj_add_flag(box, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(box, LV_OBJ_FLAG_SCROLL_ON_FOCUS);
+    lv_obj_add_flag(box, LV_OBJ_FLAG_SCROLL_WITH_ARROW); // 关键：没有这个，滚轮 KEY 不滚动容器
     lv_obj_add_flag(box, LV_OBJ_FLAG_CLICK_FOCUSABLE);
     lv_obj_set_scroll_dir(box, LV_DIR_VER);
     s_sh_box = box;
