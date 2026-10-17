@@ -26,6 +26,9 @@ add_compile_options(-O2)
 SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fpermissive -Wno-psabi -O2")
 set(LV_CONF_PATH "../../include/lv_conf.h")
 
+# 必须在 add_subdirectory(libs/lvgl) 之前：lvgl 里的 rlottie 模块要这个头文件路径
+include_directories(rlottie_inc)
+
 add_subdirectory(libs/lvgl)
 add_subdirectory(libs/lv_drivers)
 
@@ -37,7 +40,6 @@ target_include_directories(${PROJECT_NAME} PUBLIC linux_include)
 target_include_directories(${PROJECT_NAME} PUBLIC libs)
 target_include_directories(${PROJECT_NAME} PUBLIC libs/lvgl)
 target_include_directories(${PROJECT_NAME} PUBLIC libs/lv_drivers)
-include_directories(rlottie_inc)
 target_link_libraries(${PROJECT_NAME} lvgl lv_drivers uapi avcodec avdevice avformat avfilter avutil swscale pthread rlottie m)
 
 # ---------------------------------------------------------------- LiOS 桌面（独立程序）
