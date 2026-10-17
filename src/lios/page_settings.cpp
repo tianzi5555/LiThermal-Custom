@@ -346,7 +346,7 @@ static void ui_refresh(void)
     else
         snprintf(b[ROW_LIOSSIZE], 150, "桌面程序    lios");
     snprintf(b[ROW_KERNEL], 150, "内核        %s", t.kernel);
-    snprintf(b[ROW_PERMNOTE], 150, "权限说明    已强制拦截启动（见权限管理）");
+    snprintf(b[ROW_PERMNOTE], 150, "权限说明    运行时自检模型（见开发文档）");
 
     for (int i = 0; i < ROW_CNT && i < MAX_ROWS; i++)
         if (s_row_lbl[i] != NULL && lv_obj_is_valid(s_row_lbl[i]))

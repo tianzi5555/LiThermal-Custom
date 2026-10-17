@@ -144,12 +144,6 @@ static void *lios_camera_thread(void *)
 
 void lios_launch_camera(void)
 {
-    // 双保险：即使有人绕过桌面直接调这里，也再查一次权限
-    if (!lios_perm_allowed("camera", "camera"))
-    {
-        lios_log("权限拦截（兜底）：相机缺少 camera 权限，拒绝启动");
-        return;
-    }
     if (s_child_running)
     {
         lios_log("相机：已经在运行，忽略本次点击");

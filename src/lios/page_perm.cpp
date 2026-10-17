@@ -23,11 +23,11 @@
 
 #define PERM_DIR "/mnt/UDISK/liosdata/perm"
 #define PERM_DIR_BASE "/mnt/UDISK/liosdata"
-#define PERM_KEYS 4
+#define PERM_KEYS 5
 #define MAX_ROWS 32
 
-static const char *kPermKeys[PERM_KEYS] = {"storage", "camera", "network", "bg"};
-static const char *kPermNames[PERM_KEYS] = {"读写存储", "相机与视频", "网络", "后台运行"};
+static const char *kPermKeys[PERM_KEYS] = {"storage", "camera", "network", "bg", "root"};
+static const char *kPermNames[PERM_KEYS] = {"读写存储", "相机与视频", "网络", "后台运行", "ROOT 权限"};
 
 typedef struct
 {
@@ -105,7 +105,7 @@ static void load_one(const char *id, perm_rec_t *rec)
 {
     snprintf(rec->id, sizeof(rec->id), "%s", id);
     for (int i = 0; i < PERM_KEYS; i++)
-        rec->on[i] = 1; // 默认全开（第一版不做拦截，默认开更顺手；用户可逐项关）
+        rec->on[i] = 0; // 默认全关（应用装上去权限都是不启用的，用户要哪项开哪项）
 
     char p[256];
     perm_path(id, p, sizeof(p));
@@ -299,7 +299,7 @@ static void ui_rebuild(void)
         if (s_title != NULL && lv_obj_is_valid(s_title))
             lv_label_set_text(s_title, "权限管理（确认=进入）");
         if (s_hint != NULL && lv_obj_is_valid(s_hint))
-            lv_label_set_text(s_hint, "已强制：相机启动/文件管理/插件启动");
+            lv_label_set_text(s_hint, "默认全关；应用运行时用 lios_perm_allowed 自检（见开发文档）");
     }
     else
     {
