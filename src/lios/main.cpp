@@ -175,6 +175,7 @@ void lios_beat(void)
 // ---------------------------------------------------------------- 电源
 
 static volatile uint32_t s_power_press_ms = 0; // 电源键按下时刻（0 = 没按）
+static volatile uint32_t s_power_short_ms = 0; // 电源键短按释放时刻（0 = 无，组合键用）
 
 static uint32_t now_ms(void)
 {
@@ -363,7 +364,6 @@ static void lios_indev_init(void)
 // 截图/录屏（capture.cpp 实现）：电源+录像=截图；电源+菜单=录屏
 void lios_capture_screenshot(void);
 void lios_capture_rec_toggle(void);
-static volatile uint32_t s_power_short_ms = 0; // 电源短按释放时刻（0=无）
 
 // ---------------------------------------------------------------- UI 线程
 
