@@ -78,6 +78,8 @@ static char s_sh_raw[SH_OUT_MAX];  // 原始字节流（未过滤，终端样式
 static size_t s_sh_raw_len = 0;
 static char s_sh_name[NAME_MAX_LEN];
 static lv_obj_t *s_sh_label = NULL;   // 结果卡片里的输出 label（tick 刷新用）
+static lv_obj_t *s_sh_box = NULL;     // 结果卡片里的滚动容器
+static size_t s_sh_last_len = 0;      // 上次刷新时 raw 长度（变了才重新过滤）
 static lv_obj_t *s_sh_card = NULL;    // 结果卡片容器
 
 // ---------------------------------------------------------------- UI 状态
@@ -317,6 +319,8 @@ static void worker_start_sh(const char *path, const char *arg)
     unlink("/tmp/files_sh.out");
     pthread_mutex_lock(&s_mtx);
     s_sh_out[0] = 0;
+    s_sh_raw[0] = 0;     // 清空上次的原始输出（否则屏幕上残留上一个脚本的内容）
+    s_sh_raw_len = 0;
     s_sh_pos = 0;
     s_sh_running = true;
     s_sh_done = false;
@@ -482,6 +486,8 @@ static void card_close(void)
     s_sh_ready = false; // 关闭 sh 结果卡后停止刷新，避免重开
     s_sh_card = NULL;
     s_sh_label = NULL;
+    s_sh_box = NULL;
+    s_sh_last_len = 0;
     s_kb = NULL;
     if (s_card != NULL && lv_obj_is_valid(s_card))
         lv_obj_del(s_card);
@@ -626,10 +632,22 @@ static void refresh_sh_live(void)
         return;
     pthread_mutex_lock(&s_mtx);
     char out[SH_OUT_MAX];
-    sh_term_filter(s_sh_raw, s_sh_raw_len, out, sizeof(out));
+    bool running = s_sh_running;
+    bool changed = (s_sh_raw_len != s_sh_last_len);
+    if (changed)
+    {
+        sh_term_filter(s_sh_raw, s_sh_raw_len, out, sizeof(out));
+        s_sh_last_len = s_sh_raw_len;
+    }
     pthread_mutex_unlock(&s_mtx);
-    if (strcmp(out, lv_label_get_text(s_sh_label)) != 0)
-        lv_label_set_text(s_sh_label, out);
+    if (changed)
+    {
+        if (strcmp(out, lv_label_get_text(s_sh_label)) != 0)
+            lv_label_set_text(s_sh_label, out);
+        // 执行中：自动跟随到底部（像终端一样丝滑往下滚）
+        if (running && s_sh_box != NULL && lv_obj_is_valid(s_sh_box))
+            lv_obj_scroll_to_y(s_sh_box, LV_COORD_MAX, LV_ANIM_ON);
+    }
 }
 
 static void show_sh_result(void)
@@ -664,7 +682,10 @@ static void show_sh_result(void)
     lv_obj_set_size(box, 300, 194);
     lv_obj_set_pos(box, 2, 20);
     lv_obj_add_flag(box, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(box, LV_OBJ_FLAG_SCROLL_ON_FOCUS);
+    lv_obj_add_flag(box, LV_OBJ_FLAG_CLICK_FOCUSABLE);
     lv_obj_set_scroll_dir(box, LV_DIR_VER);
+    s_sh_box = box;
     lv_obj_set_scrollbar_mode(box, LV_SCROLLBAR_MODE_AUTO);
     lv_obj_set_style_bg_color(box, lv_color_hex(0x05080B), LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_border_width(box, 1, LV_PART_MAIN | LV_STATE_DEFAULT);
