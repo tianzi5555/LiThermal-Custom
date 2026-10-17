@@ -40,7 +40,7 @@ target_include_directories(${PROJECT_NAME} PUBLIC linux_include)
 target_include_directories(${PROJECT_NAME} PUBLIC libs)
 target_include_directories(${PROJECT_NAME} PUBLIC libs/lvgl)
 target_include_directories(${PROJECT_NAME} PUBLIC libs/lv_drivers)
-target_link_libraries(${PROJECT_NAME} lvgl lv_drivers uapi avcodec avdevice avformat avfilter avutil swscale pthread rlottie m)
+target_link_libraries(${PROJECT_NAME} lvgl lv_drivers uapi avformat avdevice avfilter avcodec swscale avutil pthread rlottie m)
 
 # ---------------------------------------------------------------- LiOS 桌面（独立程序）
 file(GLOB_RECURSE LIOS_SRC "src/lios/*.cpp" "src/lios/*.c")
@@ -62,7 +62,7 @@ target_include_directories(lios PUBLIC libs/lvgl)
 target_include_directories(lios PUBLIC libs/lv_drivers)
 target_include_directories(lios PUBLIC src/lios)
 # lvgl 里带 ffmpeg / rlottie 模块，即使 lios 用不到也要链接（否则 undefined reference）
-target_link_libraries(lios lvgl lv_drivers uapi avcodec avdevice avformat avfilter avutil swscale pthread rlottie m)
+target_link_libraries(lios lvgl lv_drivers uapi avformat avdevice avfilter avcodec swscale avutil pthread rlottie m)
 
 # 插件 .so 要能解析到 lios 里的 LVGL / lios_log 符号 → 必须导出动态符号表
 # （-rdynamic / -Wl,--export-dynamic）。用 CMAKE_EXE_LINKER_FLAGS 兼容老版本 cmake。
