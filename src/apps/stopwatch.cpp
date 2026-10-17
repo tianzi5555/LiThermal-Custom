@@ -19,7 +19,7 @@ static uint32_t g_paused_ms = 0;
 static double g_elapsed = 0.0; // 秒
 static char g_lapstr[LAPS_MAX * 12];
 static int g_laps_n = 0;
-static double g_laps[LAPS_MAX];
+static double g_lap_times[LAPS_MAX];
 
 static int g_enter = 0, g_rec = 0;
 static bool g_enter_down = false;
@@ -47,12 +47,12 @@ static void add_lap(void)
 {
     if (g_laps_n < LAPS_MAX)
     {
-        g_laps[g_laps_n++] = g_elapsed;
+        g_lap_times[g_laps_n++] = g_elapsed;
         char b[12];
         char tmp[LAPS_MAX * 12] = "";
         for (int i = g_laps_n - 1; i >= 0; i--)
         {
-            fmt(g_laps[i], b, sizeof(b));
+            fmt(g_lap_times[i], b, sizeof(b));
             snprintf(tmp + strlen(tmp), sizeof(tmp) - strlen(tmp), "第%d圈 %s\n", g_laps_n - i, b);
         }
         snprintf(g_lapstr, sizeof(g_lapstr), "%s", tmp);
@@ -61,13 +61,13 @@ static void add_lap(void)
     {
         // 满了就覆盖旧圈
         for (int i = 0; i < LAPS_MAX - 1; i++)
-            g_laps[i] = g_laps[i + 1];
-        g_laps[LAPS_MAX - 1] = g_elapsed;
+            g_lap_times[i] = g_lap_times[i + 1];
+        g_lap_times[LAPS_MAX - 1] = g_elapsed;
         char tmp[LAPS_MAX * 12] = "";
         char b[12];
         for (int i = LAPS_MAX - 1; i >= 0; i--)
         {
-            fmt(g_laps[i], b, sizeof(b));
+            fmt(g_lap_times[i], b, sizeof(b));
             snprintf(tmp + strlen(tmp), sizeof(tmp) - strlen(tmp), "圈%d %s\n", LAPS_MAX - i, b);
         }
         snprintf(g_lapstr, sizeof(g_lapstr), "%s", tmp);
