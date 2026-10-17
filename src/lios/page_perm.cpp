@@ -21,8 +21,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#define PERM_DIR "/mnt/UDISK/lios/perm"
-#define PERM_DIR_BASE "/mnt/UDISK/lios"
+#define PERM_DIR "/mnt/UDISK/liosdata/perm"
+#define PERM_DIR_BASE "/mnt/UDISK/liosdata"
 #define PERM_KEYS 4
 #define MAX_ROWS 32
 
@@ -56,6 +56,8 @@ static lv_obj_t *s_row_lbl[MAX_ROWS] = {0};
 static int s_row_app[MAX_ROWS] = {0}; // 行 -> 应用下标（应用列表视图用）
 static int s_view = 0;                // 0=应用列表 1=权限项
 static char s_cur_id[64] = "";
+static bool s_built = false;   // 本页是否已重建过（每次建页重置）
+static int s_focus_want = 0;   // 重建后希望聚焦的行（避免切换开关后被拽回第一行）
 
 static void ui_rebuild(void);
 static void row_click_cb(lv_event_t *e);
@@ -323,7 +325,13 @@ static void ui_rebuild(void)
         }
     }
     if (n > 0)
-        lv_group_focus_obj(s_rows[0]);
+    {
+        int want = s_focus_want;
+        if (want < 0 || want >= n)
+            want = 0;
+        lv_group_focus_obj(s_rows[want]);
+    }
+    s_focus_want = 0;
 }
 
 static void row_click_cb(lv_event_t *e)
@@ -359,6 +367,7 @@ static void row_click_cb(lv_event_t *e)
             }
         }
         pthread_mutex_unlock(&s_mtx);
+        s_focus_want = row; // 切换后仍停在原来这一行
         ui_rebuild();
     }
 }
@@ -371,6 +380,7 @@ static bool page_key(int key)
         if (s_view == 1)
         {
             s_view = 0;
+            s_focus_want = 0;
             ui_rebuild();
             return true;
         }
@@ -397,10 +407,9 @@ static void page_tick(void)
     snprintf(st, sizeof(st), "%s", s_status);
     pthread_mutex_unlock(&s_mtx);
 
-    static bool built = false;
-    if (loaded && !built)
+    if (loaded && !s_built)
     {
-        built = true;
+        s_built = true;
         ui_rebuild();
     }
     if (st[0] != 0)
@@ -425,6 +434,7 @@ static void page_destroy(void)
     }
     s_view = 0;
     s_cur_id[0] = 0;
+    s_built = false;
 }
 
 static const lios_page_hooks_t s_hooks = {page_key, page_tick, page_destroy};
@@ -432,6 +442,13 @@ static const lios_page_hooks_t s_hooks = {page_key, page_tick, page_destroy};
 void page_perm_create(lv_obj_t *parent)
 {
     perm_worker_start();
+
+    // 每次进页面都重新读一遍权限文件 + 重置重建标志（否则第二次进来会一直显示"正在读取"）
+    pthread_mutex_lock(&s_mtx);
+    s_loaded = false;
+    s_built = false;
+    s_load_req = true;
+    pthread_mutex_unlock(&s_mtx);
 
     s_view = 0;
     s_title = lv_label_create(parent);
