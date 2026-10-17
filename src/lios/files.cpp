@@ -479,6 +479,7 @@ static void card_btn_cb(lv_event_t *e)
 
 static void card_close(void)
 {
+    s_sh_ready = false; // 关闭 sh 结果卡后停止刷新，避免重开
     s_sh_card = NULL;
     s_sh_label = NULL;
     s_kb = NULL;
@@ -577,7 +578,7 @@ static void refresh_sh_live(void)
         return;
     pthread_mutex_lock(&s_mtx);
     char out[SH_OUT_MAX];
-    snprintf(out, sizeof(out), "%s", s_sh_out);
+    sh_term_filter(s_sh_raw, s_sh_raw_len, out, sizeof(out));
     pthread_mutex_unlock(&s_mtx);
     if (strcmp(out, lv_label_get_text(s_sh_label)) != 0)
         lv_label_set_text(s_sh_label, out);
@@ -587,8 +588,8 @@ static void show_sh_result(void)
 {
     pthread_mutex_lock(&s_mtx);
     char out[SH_OUT_MAX];
-    snprintf(out, sizeof(out), "%s", s_sh_out);
-    s_sh_ready = false;
+    sh_term_filter(s_sh_raw, s_sh_raw_len, out, sizeof(out));
+    // 不能清 s_sh_ready：清掉后 tick 不再刷新，卡片停在空中
     pthread_mutex_unlock(&s_mtx);
 
     card_close();
