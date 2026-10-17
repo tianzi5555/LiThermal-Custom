@@ -173,11 +173,15 @@ static void btn_clear_logs_cb(lv_event_t *e)
 static void btn_lios_cb(lv_event_t *e)
 {
     (void)e;
-    ui_trace("terminal: 按「退出到桌面」-> 保存设置并退出相机进程");
+    ui_trace("terminal: 按「回桌面」-> 保存设置并拉起 lios 桌面");
     settings_save();          // 先把相机设置落盘（和正常退出一样）
     videoPlayer.disconnect(); // 断开 RTSP，把显示/网络让出来
     sync();
-    _exit(0); // 父进程（lios 桌面）会 waitpid 到它并重绘桌面
+    // 开机默认进相机：这里用 lios 替换本进程（exec）。
+    // lios 退出（关机/结束）后，thermalcamera.sh 的循环会把相机拉回来。
+    execl("/mnt/UDISK/lios", "lios", (char *)NULL);
+    // exec 失败（比如 lios 被删）才落到这里：退出让父脚本循环重启相机
+    _exit(0);
 }
 
 // ---------------------------------------------------------------- 页面

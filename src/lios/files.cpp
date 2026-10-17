@@ -181,93 +181,117 @@ static void *sh_monitor(void *arg)
     char **pp = (char **)arg;
     const char *path = pp[0];
     const char *arg2 = pp[1];
-    const char *outf = "/tmp/files_sh.out";
 
     char cmd[PATH_MAX_LEN + 96];
     if (arg2 != NULL && strcmp(arg2, "cat") == 0)
-        snprintf(cmd, sizeof(cmd), "cat '%s' > %s 2>&1", path, outf);
+        snprintf(cmd, sizeof(cmd), "cat '%s'", path); // 只看内容，不执行
     else
-        snprintf(cmd, sizeof(cmd), "(sh '%s') > %s 2>&1", path, outf);
+        snprintf(cmd, sizeof(cmd), "sh '%s'", path);  // 用 sh 执行脚本
+
+    // 用管道（不是文件）：子进程 write() 一行，这里立刻 read() 一行 = 真·逐行实时
+    int fds[2];
+    if (pipe(fds) != 0)
+    {
+        pthread_mutex_lock(&s_mtx);
+        snprintf(s_sh_out, SH_OUT_MAX, "(创建管道失败)");
+        s_sh_running = false;
+        s_sh_done = true;
+        s_sh_exit = -1;
+        pthread_mutex_unlock(&s_mtx);
+        free(pp[0]);
+        free(pp[1]);
+        free(pp);
+        return NULL;
+    }
 
     pid_t pid = fork();
     if (pid == 0)
     {
+        dup2(fds[1], STDOUT_FILENO);
+        dup2(fds[1], STDERR_FILENO);
+        close(fds[0]);
+        close(fds[1]);
         execl("/bin/sh", "sh", "-c", cmd, (char *)NULL);
         _exit(127);
     }
+    close(fds[1]);
 
-    int st = 0, waited = 0;
+    int st = 0;
     bool timeout = false;
-    if (pid > 0)
+    bool child_done = false;
+    uint32_t start = lv_tick_get();
+    char rbuf[128];
+    size_t rb = 0;
+
+    for (;;)
     {
-        while (waited < 15000)
+        // 非阻塞读管道，把能读到的都搬进 s_sh_out
+        for (;;)
         {
-            // 读文件新内容（脚本边写边读）
-            FILE *f = fopen(outf, "r");
-            if (f != NULL)
+            ssize_t n = read(fds[0], rbuf + rb, sizeof(rbuf) - 1 - rb);
+            if (n > 0)
             {
-                long sz = 0;
-                fseek(f, 0, SEEK_END);
-                sz = ftell(f);
-                if (sz > s_sh_pos)
+                rb += (size_t)n;
+                // 有换行或攒够了就追加
+                bool flush = false;
+                for (size_t k = 0; k < rb; k++)
+                    if (rbuf[k] == '\n')
+                    {
+                        flush = true;
+                        break;
+                    }
+                if (flush || rb >= sizeof(rbuf) - 1)
                 {
-                    fseek(f, s_sh_pos, SEEK_SET);
-                    long want = sz - s_sh_pos;
-                    if (want > SH_OUT_MAX - 256)
-                        want = SH_OUT_MAX - 256;
-                    char buf[SH_OUT_MAX];
-                    size_t got = fread(buf, 1, (size_t)want, f);
-                    buf[got] = 0;
+                    rbuf[rb] = 0;
                     pthread_mutex_lock(&s_mtx);
                     size_t cur = strlen(s_sh_out);
-                    if (cur + got + 1 < SH_OUT_MAX)
+                    if (cur + rb + 1 < SH_OUT_MAX)
                     {
-                        memcpy(s_sh_out + cur, buf, got + 1);
-                        s_sh_pos += (long)got;
+                        memcpy(s_sh_out + cur, rbuf, rb + 1);
+                        s_sh_pos += (long)rb;
                     }
                     pthread_mutex_unlock(&s_mtx);
+                    rb = 0;
                 }
-                fclose(f);
+                continue;
             }
-            if (waitpid(pid, &st, WNOHANG) == pid)
-                break;
-            usleep(120000);
-            waited += 120;
+            break;
         }
-        if (waited >= 15000)
+        (void)rb;
+        if (rb > 0)
         {
-            kill(pid, SIGKILL);
-            waitpid(pid, NULL, 0);
-            timeout = true;
+            rbuf[rb] = 0;
+            pthread_mutex_lock(&s_mtx);
+            size_t cur = strlen(s_sh_out);
+            if (cur + rb + 1 < SH_OUT_MAX)
+            {
+                memcpy(s_sh_out + cur, rbuf, rb + 1);
+                s_sh_pos += (long)rb;
+            }
+            pthread_mutex_unlock(&s_mtx);
+            rb = 0;
         }
-    }
 
-    // 收尾：再读一次剩余输出 + 打结束标记
+        if (!child_done)
+        {
+            if (waitpid(pid, &st, WNOHANG) == pid)
+                child_done = true;
+            else if (lv_tick_get() - start > 15000)
+            {
+                kill(pid, SIGKILL);
+                waitpid(pid, NULL, 0);
+                timeout = true;
+                child_done = true;
+            }
+        }
+        if (child_done)
+            break;
+        usleep(30000);
+    }
+    close(fds[0]);
+
     pthread_mutex_lock(&s_mtx);
     {
-        FILE *f = fopen(outf, "r");
-        if (f != NULL)
-        {
-            fseek(f, 0, SEEK_END);
-            long sz = ftell(f);
-            if (sz > s_sh_pos)
-            {
-                fseek(f, s_sh_pos, SEEK_SET);
-                long want = sz - s_sh_pos;
-                if (want > SH_OUT_MAX - 256)
-                    want = SH_OUT_MAX - 256;
-                char buf[SH_OUT_MAX];
-                size_t got = fread(buf, 1, (size_t)want, f);
-                buf[got] = 0;
-                size_t cur = strlen(s_sh_out);
-                if (cur + got + 1 < SH_OUT_MAX)
-                {
-                    memcpy(s_sh_out + cur, buf, got + 1);
-                    s_sh_pos += (long)got;
-                }
-            }
-            fclose(f);
-        }
         if (s_sh_out[0] == 0)
             snprintf(s_sh_out, SH_OUT_MAX, "(脚本无输出)");
         char tail[96];
@@ -285,7 +309,6 @@ static void *sh_monitor(void *arg)
         s_sh_exit = timeout ? -2 : (WIFEXITED(st) ? WEXITSTATUS(st) : -1);
         snprintf(s_status, sizeof(s_status), "脚本%s", timeout ? "超时结束" : "执行完成");
         s_status_dirty = true;
-        s_busy = false;
     }
     pthread_mutex_unlock(&s_mtx);
 
@@ -305,7 +328,6 @@ static void worker_start_sh(const char *path, const char *arg)
     s_sh_running = true;
     s_sh_done = false;
     s_sh_exit = -1;
-    s_busy = true;
     s_sh_ready = true; // 卡片马上显示
     pthread_mutex_unlock(&s_mtx);
 
@@ -345,6 +367,9 @@ static void worker_op(int req, const char *path, const char *arg)
     else if (req == REQ_RUNSH)
     {
         worker_start_sh(path, arg); // 立即返回（实时输出由监控线程边跑边补）
+        pthread_mutex_lock(&s_mtx);
+        s_busy = false; // 不占着 worker，别的请求照常
+        pthread_mutex_unlock(&s_mtx);
         return;
     }
     else if (req == REQ_RENAME)
@@ -613,7 +638,11 @@ static void show_sh_result(void)
     s_card_cb = NULL;
     for (int i = 0; i < MAX_ROWS; i++)
         if (s_rows[i] != NULL && lv_obj_is_valid(s_rows[i]))
+        {
             lv_obj_clear_flag(s_rows[i], LV_OBJ_FLAG_CLICK_FOCUSABLE);
+            if (lv_group_get_default() != NULL)
+                lv_group_remove_obj(s_rows[i]); // 焦点留在卡片里，滚轮绝不串到文件列表
+        }
     lv_group_focus_obj(box);
 }
 
