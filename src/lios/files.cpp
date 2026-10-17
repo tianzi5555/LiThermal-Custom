@@ -327,6 +327,7 @@ static void worker_start_sh(const char *path, const char *arg)
     s_sh_exit = -1;
     s_sh_ready = true; // 卡片马上显示
     pthread_mutex_unlock(&s_mtx);
+    lios_log("文件管理：开始执行脚本 %s", path);
 
     char **pp = (char **)malloc(2 * sizeof(char *));
     if (pp == NULL)
@@ -633,21 +634,14 @@ static void refresh_sh_live(void)
     pthread_mutex_lock(&s_mtx);
     char out[SH_OUT_MAX];
     bool running = s_sh_running;
-    bool changed = (s_sh_raw_len != s_sh_last_len);
-    if (changed)
-    {
-        sh_term_filter(s_sh_raw, s_sh_raw_len, out, sizeof(out));
-        s_sh_last_len = s_sh_raw_len;
-    }
+    sh_term_filter(s_sh_raw, s_sh_raw_len, out, sizeof(out));
     pthread_mutex_unlock(&s_mtx);
-    if (changed)
-    {
-        if (strcmp(out, lv_label_get_text(s_sh_label)) != 0)
-            lv_label_set_text(s_sh_label, out);
-        // 执行中：自动跟随到底部（像终端一样丝滑往下滚）
-        if (running && s_sh_box != NULL && lv_obj_is_valid(s_sh_box))
-            lv_obj_scroll_to_y(s_sh_box, LV_COORD_MAX, LV_ANIM_ON);
-    }
+    // 每帧都过滤并设置（不做"变了才改"守卫：一旦守卫出错就会空屏，不值得）
+    if (strcmp(out, lv_label_get_text(s_sh_label)) != 0)
+        lv_label_set_text(s_sh_label, out);
+    // 执行中：自动跟随到底部（像终端一样丝滑往下滚）
+    if (running && s_sh_box != NULL && lv_obj_is_valid(s_sh_box))
+        lv_obj_scroll_to_y(s_sh_box, LV_COORD_MAX, LV_ANIM_ON);
 }
 
 static void show_sh_result(void)
@@ -657,6 +651,7 @@ static void show_sh_result(void)
     sh_term_filter(s_sh_raw, s_sh_raw_len, out, sizeof(out));
     // 不能清 s_sh_ready：清掉后 tick 不再刷新，卡片停在空中
     pthread_mutex_unlock(&s_mtx);
+    lios_log("文件管理：弹结果卡 raw_len=%u running=%d", (unsigned)s_sh_raw_len, s_sh_running ? 1 : 0);
 
     card_close();
     s_card = lv_obj_create(lv_scr_act());
