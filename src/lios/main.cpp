@@ -275,7 +275,12 @@ static void *lios_thread_keys(void *)
             if (ev.value == 1)
                 s_power_press_ms = now_ms();
             else
+            {
+                uint32_t held = (s_power_press_ms != 0) ? (now_ms() - s_power_press_ms) : 0;
                 s_power_press_ms = 0;
+                if (held > 0 && held < 800)
+                    s_power_short_ms = now_ms(); // 电源短按（组合键用）
+            }
             continue;
         }
         if (ev.value != 1)
@@ -296,6 +301,13 @@ static lv_disp_draw_buf_t s_draw_buf;
 static lv_disp_drv_t s_disp_drv;
 static lv_color_t *s_fb_buf = NULL;
 static uint32_t s_width = 0, s_height = 0;
+
+// 截图/录屏用的帧访问（capture.cpp 调用）
+lv_color_t *lios_fb_buf(void) { return s_fb_buf; }
+uint32_t lios_fb_w(void) { return s_width; }
+uint32_t lios_fb_h(void) { return s_height; }
+void lios_lock_display(void) { LOCKLV(); }
+void lios_unlock_display(void) { UNLOCKLV(); }
 
 static int lios_display_init(void)
 {
@@ -348,6 +360,11 @@ static void lios_indev_init(void)
     lv_indev_set_group(indev, group);
 }
 
+// 截图/录屏（capture.cpp 实现）：电源+录像=截图；电源+菜单=录屏
+void lios_capture_screenshot(void);
+void lios_capture_rec_toggle(void);
+static volatile uint32_t s_power_short_ms = 0; // 电源短按释放时刻（0=无）
+
 // ---------------------------------------------------------------- UI 线程
 
 static void *lios_thread_ui(void *)
@@ -377,6 +394,22 @@ static void *lios_thread_ui(void *)
         lios_beat();
         lv_task_handler();
         lios_desktop_tick();
+        // 组合键：电源短按 + 录像 = 截图；电源短按 + 菜单 = 录屏开/停
+        if (s_power_short_ms != 0 && (now_ms() - s_power_short_ms) < 600)
+        {
+            if (lios_key_take(LIOS_K_REC))
+            {
+                s_power_short_ms = 0;
+                lios_capture_screenshot();
+            }
+            else if (lios_key_take(LIOS_K_MENU))
+            {
+                s_power_short_ms = 0;
+                lios_capture_rec_toggle();
+            }
+            else if ((now_ms() - s_power_short_ms) > 500)
+                s_power_short_ms = 0;
+        }
         UNLOCKLV();
         usleep(5000);
     }
