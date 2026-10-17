@@ -67,38 +67,52 @@ set_target_properties(ball tetris PROPERTIES PREFIX "" OUTPUT_NAME "...")
 
 ## 六、下一步（按顺序）
 
-1. ~~`lios-login`（密码界面）+ 改 `thermalcamera.sh`~~ → **已废弃**（用户决定不要密码界面）
-2. ✅ 桌面骨架：扫描 `apps/` + 方块网格 + dlopen + 按键转发
-3. 把 ball/tetris 编成 .so 并验证安装/退出/内存回收
-4. 文件管理器 / 设置 / 权限 / 后台 逐个补
+1. ~~`lios-login`（密码界面）~~ → **已废弃**（用户决定不要密码界面）
+2. ✅ 桌面骨架：方块网格 + 插件 dlopen + 按键转发 + 相机 fork/exec + 双向切换
+3. 文件管理器 / 设置 / 权限 / 后台 逐个做成真页面
+4. 把 ball/tetris 编成 .so 并验证安装/退出/内存回收
 
 ## 七、给未来会话的提醒
 - 仓库：`C:\Users\Administrator\Desktop\Deepseek Harness EAC\LiThermal_clean`（公开仓库 `tianzi5555/LiThermal-Custom`）
 - **git push 必须绕开坏代理**：`git -c http.proxy= -c https.proxy= push origin HEAD`
-- 部署：`LiThermalNet\tools\deploy_bg.ps1`（自动等 CI → 下载 → 推 `.new` → 校验 MD5 → 改名 → 重启）
+- 部署：`LiThermalNet\tools\deploy_two_programs.ps1`（相机 + lios + 启动脚本一起推，先备份 `bak_liosN`）
 - 相机 adb 序列号 `20080411`；adb 掉线只 kill/start-server，**绝不动 Windows 设备管理器**；
   `kill-server`/`start-server`/`reconnect offline` 都救不回来时让用户**拔插一次 USB 线**
 - 磁盘"卡住/No Media"先试 `diskpart` 的 `rescan`（一条命令救回来）
 
-## 八、当前实现（第三批之后）
+## 八、当前实现（最终架构：两个平级程序）
 
-* **没有两个二进制**：桌面是同一个 `LiThermal` 程序里的一个模式，
-  入口 = 相机里的隐藏 SH 终端「进LiOS」按钮
-* **开机直接进相机**（密码界面、`--login`、`lios.conf` 全部删除，不留死代码）
-* 代码：`src/lios/lios_launcher.cpp`（桌面 + 插件框架 + 双向切换）、
-  `include/lios_launcher.h`、`include/lios_app.h`（插件 ABI）
-* **返回规则**：应用页按 菜单/录像/确认 都回桌面；桌面按菜单键回相机
-* 看门狗：UI 心跳停 3 秒 → 写日志 + `_exit(99)`，让脚本重启相机（不留死屏）
-* 使用说明 / 回滚手册 / 踩坑清单见 **`docs/LiOS_第二期_部署与回滚.md`**
+```
+thermalcamera.sh（开机）→ 直接跑 /mnt/UDISK/lios（桌面）
+                            lios 缺失/崩溃 → 兜底跑 /mnt/UDISK/LiThermal（防黑屏）
 
-### 必须守住的两条纪律（都踩过坑）
-1. **LVGL 事件回调 / 定时器回调里绝不 `LOCKLV()`、绝不做文件 I/O**
+lios（独立程序，src/lios/）      LiThermal（相机，保持原版）
+ ├ 方块网格 + 插件 .so           └ 唯一改动：隐藏终端里的「回桌面」按钮 = exit(0)
+ ├ 【相机】→ fork+exec 相机
+ │    · waitpid 在 worker 线程
+ │    · 相机前台时桌面暂停渲染
+ │    · 相机退出 → 整屏重绘回桌面
+ └ 文件管理器/设置/权限/后台（待做）
+```
+
+* 代码：`src/lios/main.cpp`（LVGL+显示+输入+UI 线程+看门狗+相机 fork/exec）、
+  `src/lios/desktop.cpp`（网格+页面栈+返回键）、`src/lios/apps.cpp`（方块清单）、
+  `include/lios_app.h`（插件 ABI）
+* 相机侧从原版 `e7db579` 恢复，只保留「回桌面」按钮 + `lv_mutex` 改递归锁
+
+### 必须守住的纪律（都踩过坑）
+1. **LVGL 事件回调 / 定时器回调里绝不加锁、绝不做文件 I/O**
    —— 事件是在 `lv_timer_handler()` 内部派发的，那时锁已经在手里；
-   非递归锁会自锁死整机（`lv_mutex` 现已改递归锁兜底），写文件实测会卡住
-2. **UI 线程（`HAL::lv_loop`）跑起来之前创建的 LVGL 定时器不会被触发**
+   非递归锁会自锁死整机（两个程序现在都用递归锁兜底），写文件实测会卡住
+2. **UI 线程跑起来之前创建的 LVGL 定时器不会被触发**
+3. **`waitpid` 绝不能在 LVGL 线程里等**（相机的退出等待放在 worker 线程）
+4. **相机在前台时桌面不能画**（两个进程抢 `/dev/fb0` 会花屏）
 
 ### 部署注意
-`build_custom.sh` 打包用的 `thermalcamera.sh` 来自编译器仓库 `lxydiy/LiThermal_Compiler`，
-当前 token 对它**没有写权限** → 每次重新部署固件后要把本仓库根目录的
-`thermalcamera.sh` 单独推回相机（部署脚本只推 LiThermal 本体）。
+`build_custom.sh` 会优先用**本仓库**根目录的 `thermalcamera.sh`，并把 `build/lios`
+一起打进 UDISK（缺了直接报错）。所以启动脚本和 lios 都在 CI 产物里了，
+但部署脚本仍要**一起推**（见 `deploy_two_programs.ps1`）。
+
+现行使用说明 / 回滚手册见 **`docs/LiOS_部署与回滚.md`**。
+
 
