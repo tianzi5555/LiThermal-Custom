@@ -31,6 +31,8 @@
 // ============================================================================
 
 #include "lios_app.h"
+// lios_log 由主程序 lios 导出（-rdynamic），插件可直接调用（写 /tmp/lios.log）
+extern "C" void lios_log(const char *fmt, ...);
 #include "my_main.h"
 
 #include <math.h>

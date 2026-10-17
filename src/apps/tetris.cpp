@@ -299,12 +299,10 @@ static void tw_update_speed(void)
     if (p < 80)
         p = 80; // 最快 80ms，避免高等级瞬间到底
     g->drop_interval = p;
-
-    if (g_timer)
-        // 注意：定时器必须保持固定 20ms 周期！drop_tick 每回调 +20ms，
-    // 达到 drop_interval 才落一格。之前这里把周期设成 drop_interval，
-    // 导致要 25 次 × 500ms = 12.5 秒才落一格 → 表现为「不会自动下落」。
-    // 所以这里不改周期（只更新 drop_interval 供累加比较用）。
+    // 注意：定时器必须保持固定 20ms 周期（见 tw_timer_cb 里的 drop_tick += 20）。
+    // 之前这里调用过 lv_timer_set_period(g_timer, drop_interval)，
+    // 导致 drop_tick 每 500ms 才 +20ms → 25 次才落一格 ≈ 12.5 秒，
+    // 表现为「俄罗斯方块不会自动下落」。现已删除该调用。
 }
 
 // 生成下一个方块
