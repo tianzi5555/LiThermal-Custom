@@ -228,15 +228,12 @@ static void *sh_monitor(void *arg)
                     char buf[SH_OUT_MAX];
                     size_t got = (size_t)fread(buf, 1, (size_t)want, f);
                     buf[got] = 0;
-                    // \r 转 \n（进度条那种  覆盖显示，转成一行行）
-                    for (size_t k = 0; k < got; k++)
-                        if (buf[k] == '\r')
-                            buf[k] = '\n';
                     pthread_mutex_lock(&s_mtx);
-                    size_t cur = strlen(s_sh_out);
-                    if (cur + got + 1 < SH_OUT_MAX)
+                    if (s_sh_raw_len + got < SH_OUT_MAX - 1)
                     {
-                        memcpy(s_sh_out + cur, buf, got + 1);
+                        memcpy(s_sh_raw + s_sh_raw_len, buf, got);
+                        s_sh_raw_len += got;
+                        s_sh_raw[s_sh_raw_len] = 0;
                         s_sh_pos += (long)got;
                     }
                     pthread_mutex_unlock(&s_mtx);
@@ -277,20 +274,18 @@ static void *sh_monitor(void *arg)
                 char buf[SH_OUT_MAX];
                 size_t got = (size_t)fread(buf, 1, (size_t)want, f);
                 buf[got] = 0;
-                for (size_t k = 0; k < got; k++)
-                    if (buf[k] == '\r')
-                        buf[k] = '\n';
-                size_t cur = strlen(s_sh_out);
-                if (cur + got + 1 < SH_OUT_MAX)
+                if (s_sh_raw_len + got < SH_OUT_MAX - 1)
                 {
-                    memcpy(s_sh_out + cur, buf, got + 1);
+                    memcpy(s_sh_raw + s_sh_raw_len, buf, got);
+                    s_sh_raw_len += got;
+                    s_sh_raw[s_sh_raw_len] = 0;
                     s_sh_pos += (long)got;
                 }
             }
             fclose(f);
         }
-        if (s_sh_out[0] == 0)
-            snprintf(s_sh_out, SH_OUT_MAX, "(脚本无输出)");
+        if (s_sh_raw_len == 0)
+            snprintf(s_sh_raw, SH_OUT_MAX, "(脚本无输出)");
         char tail[96];
         if (timeout)
             snprintf(tail, sizeof(tail), "\n[超时 15 秒，已强制结束]");
@@ -298,9 +293,11 @@ static void *sh_monitor(void *arg)
             snprintf(tail, sizeof(tail), "\n[结束，退出码 %d]", WEXITSTATUS(st));
         else
             snprintf(tail, sizeof(tail), "\n[被信号终止]");
-        size_t cur = strlen(s_sh_out);
-        if (cur + strlen(tail) + 1 < SH_OUT_MAX)
-            strcat(s_sh_out, tail);
+        if (s_sh_raw_len + strlen(tail) < SH_OUT_MAX - 1)
+        {
+            strcat(s_sh_raw, tail);
+            s_sh_raw_len += strlen(tail);
+        }
         s_sh_running = false;
         s_sh_done = true;
         s_sh_exit = timeout ? -2 : (WIFEXITED(st) ? WEXITSTATUS(st) : -1);
