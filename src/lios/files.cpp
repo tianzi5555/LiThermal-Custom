@@ -484,14 +484,19 @@ static void card_btn_cb(lv_event_t *e)
 
 static void card_close(void)
 {
-    s_sh_ready = false; // 关闭 sh 结果卡后停止刷新，避免重开
+    // 只有确实关掉一张卡片时才清 s_sh_ready：
+    // show_sh_result() 开头会调 card_close() 做"重置"，那时 s_card 为 NULL，
+    // 若无条件清 s_sh_ready，卡片刚建好刷新就被停掉 -> 永远空白。
+    if (s_card != NULL && lv_obj_is_valid(s_card))
+    {
+        s_sh_ready = false; // 用户关掉卡片后停止刷新
+        lv_obj_del(s_card);
+    }
     s_sh_card = NULL;
     s_sh_label = NULL;
     s_sh_box = NULL;
     s_sh_last_len = 0;
     s_kb = NULL;
-    if (s_card != NULL && lv_obj_is_valid(s_card))
-        lv_obj_del(s_card);
     s_card = NULL;
     s_card_cb = NULL;
     // 卡片关掉：把可见行放回默认组，并让组内焦点循环（滚到底回第一个）
