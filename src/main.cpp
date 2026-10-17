@@ -1,8 +1,7 @@
 #include "my_main.h"
 #include "uiTrace.h"
 #include "statusBar.h"
-#include "lios_user.h"     // LiOS 第一期：开机密码 + 两种顶层模式（--login）
-#include "lios_launcher.h" // LiOS 第二期：真桌面 + 双向模式切换
+#include "lios_launcher.h" // LiOS 桌面 + 相机双向切换
 #include "perfProbe.h" // 临时性能探针（诊断用，可删）
 #include <signal.h>
 #include <fcntl.h>
@@ -199,13 +198,8 @@ void *thread_temp_poll_func(void *)
 
 int main(int argc, char **argv)
 {
-    // 只读自检：`LiThermal --selftest-pw` —— 把 lios.conf 的解析结果和三条密码判定写进
-    // /tmp/lios.log（只输出长度/校验和，不建界面、不改任何文件），排查密码分流用。
-    for (int i = 1; i < argc; i++)
-    {
-        if (argv[i] != NULL && strcmp(argv[i], "--selftest-pw") == 0)
-            return lios_selftest_pw();
-    }
+    (void)argc;
+    (void)argv;
 
     perf_probe_init(); // 临时性能探针：/tmp/perf.log，每 1 秒汇总一行（诊断用，可删）
     install_crash_handler();
@@ -229,39 +223,16 @@ int main(int argc, char **argv)
     lv_obj_clear_flag(lv_layer_top(), LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_clear_flag(lv_layer_sys(), LV_OBJ_FLAG_SCROLLABLE);
 
-    // ---- LiOS 第一期：开机密码 + 两种顶层模式 ----
-    // 不带 --login 时 lios_user_prepare 返回 false，下面这段整段跳过，
-    // 行为与改动前**完全一致**（绝不影响现有部署）。
-    bool enter_lios_mode = lios_debug_lios_requested(argc, argv); // --debug-lios 直接进桌面（调试）
-    if (!enter_lios_mode && lios_user_prepare(argc, argv))
-    {
-        current_mode = MODE_LOGIN; // 让滚轮/按键交给密码界面（见 myHAL.cpp: encoder_read）
-        lios_mode_t m = lios_login_show_and_run();
-        enter_lios_mode = (m == LIOS_ENTER_LIOS);
-        printf("[lios] 进入%s\n", enter_lios_mode ? " LiOS 模式" : "相机");
-    }
-
-    // ---- 相机启动（幂等）----
-    // 由 enter_camera() 统一负责：waitboot 连接动画、各 UI 部件、相机线程。
-    // 第二期起相机/C 桌面可以双向往返，所以这里不再直接建线程。
-    if (enter_lios_mode)
-    {
-        // LiOS 模式：先让 launcher 线程去建桌面；桌面退出后它自己会调 enter_camera()
-        current_mode = MODE_LIOS;
-        // 自动测试默认关闭，只有 /tmp/lios_autotest 存在才跑；
-        // 看门狗在 enter_camera() 起完 UI 线程后自动启动（那时心跳才有意义）
-        lios_autotest_start();
-        lios_enter();
-        printf("[lios] 已切到 LiOS 桌面（退出桌面后自动启动相机）\n");
-    }
-    else
-    {
-        current_mode = MODE_MAINPAGE;
-        enter_camera();
-    }
+    // ---- 启动就进相机 ----
+    // 密码界面已经彻底删掉了：现在 LiOS 桌面的唯一入口是相机里的隐藏 SH 终端
+    //（系统设置 → 手动清除噪声 → 录像键 → 右上角「进LiOS」）。
+    // enter_camera() 负责 waitboot 连接动画、各 UI 部件、相机线程（幂等）。
+    current_mode = MODE_MAINPAGE;
+    lios_autotest_start(); // 只有 /tmp/lios_autotest 存在时才真的跑（调试钩子）
+    enter_camera();
 
     void *result;
-    // LiOS 启动路径下 UI 线程是 launcher 线程建的，等它建出来再 join。
+    // LiOS 桌面的 UI 线程可能是 launcher 线程建的，等它建出来再 join。
     // （直接 pthread_join(thread_ui) 有 join 到 0 的风险，那是未定义行为、实测会崩）
     while (!lios_camera_ready())
         usleep(20000);

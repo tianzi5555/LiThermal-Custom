@@ -2,17 +2,24 @@
 
 目标：在 LiThermal 相机上做一套可扩展的应用平台，**以后加应用不用改固件**。
 
-## 一、开机流程（两套密码）
+## 一、开机流程（⚠️ 已废弃：密码界面已删除）
+
+> **这一节已经不做了。** 用户后来决定：相机里既然已经有「隐藏 SH 终端 → 进LiOS」这个入口，
+> 就不需要开机密码界面这一层。现在**开机直接进相机**（与最早的部署完全一致），
+> LiOS 桌面的唯一入口是隐藏 SH 终端里的「进LiOS」按钮。
+> 相关代码（`lios_login.cpp` / `lios_config.c` / `lios_user.h` / `MODE_LOGIN` / `--login`）
+> 与相机上的 `/mnt/UDISK/lios.conf` **都已删除**。
 
 ```
-thermalcamera.sh（现在直接跑 LiThermal）
-  → 改为先跑一个小程序 lios-login（LVGL 密码界面，复用 src/ui/keyboard.cpp 的键盘）
-      密码 123456  → exec /mnt/UDISK/LiThermal   （现在的相机界面，功能完全不变，含隐藏相册）
-      密码 5555    → exec /mnt/UDISK/lios         （新的桌面系统）
+thermalcamera.sh（现在直接跑 LiThermal，行为与最早一致）
+  → /mnt/UDISK/LiThermal          # 开机直接进相机（含隐藏相册/隐藏终端）
+      隐藏终端（系统设置→手动清除噪声→录像键）→ 右上角「进LiOS」
+      → LiOS 桌面；桌面按菜单键 / 选「相机」方块 → 回相机
 ```
-安全兜底：
-- 密码从 `/mnt/UDISK/lios.conf` 读；**文件缺失/读不出 → 默认直接进相机**（绝不锁死用户）
-- login 崩溃/超时 → thermalcamera.sh 的循环会退化成直接跑相机
+
+（下面这段是第一期的历史设计，保留仅作参考）
+- ~~密码从 `/mnt/UDISK/lios.conf` 读；文件缺失/读不出 → 默认直接进相机~~（已删除）
+- ~~login 崩溃/超时 → thermalcamera.sh 的循环会退化成直接跑相机~~（已删除）
 
 ## 二、应用平台（插件 ABI）
 
@@ -60,8 +67,8 @@ set_target_properties(ball tetris PROPERTIES PREFIX "" OUTPUT_NAME "...")
 
 ## 六、下一步（按顺序）
 
-1. `lios-login`（密码界面）+ 改 `thermalcamera.sh`
-2. `lios` 桌面骨架：扫描 `apps/` + 方块网格 + dlopen + 按键转发
+1. ~~`lios-login`（密码界面）+ 改 `thermalcamera.sh`~~ → **已废弃**（用户决定不要密码界面）
+2. ✅ 桌面骨架：扫描 `apps/` + 方块网格 + dlopen + 按键转发
 3. 把 ball/tetris 编成 .so 并验证安装/退出/内存回收
 4. 文件管理器 / 设置 / 权限 / 后台 逐个补
 
@@ -69,24 +76,29 @@ set_target_properties(ball tetris PROPERTIES PREFIX "" OUTPUT_NAME "...")
 - 仓库：`C:\Users\Administrator\Desktop\Deepseek Harness EAC\LiThermal_clean`（公开仓库 `tianzi5555/LiThermal-Custom`）
 - **git push 必须绕开坏代理**：`git -c http.proxy= -c https.proxy= push origin HEAD`
 - 部署：`LiThermalNet\tools\deploy_bg.ps1`（自动等 CI → 下载 → 推 `.new` → 校验 MD5 → 改名 → 重启）
-- 相机 adb 序列号 `20080411`；adb 掉线只 kill/start-server，**绝不动 Windows 设备管理器**
+- 相机 adb 序列号 `20080411`；adb 掉线只 kill/start-server，**绝不动 Windows 设备管理器**；
+  `kill-server`/`start-server`/`reconnect offline` 都救不回来时让用户**拔插一次 USB 线**
 - 磁盘"卡住/No Media"先试 `diskpart` 的 `rescan`（一条命令救回来）
 
-## 八、第一期实际实现（与上面设计稿的差别）
+## 八、当前实现（第三批之后）
 
-**没有做两个二进制。** 改成同一个 `LiThermal` 程序里的两种顶层模式：
+* **没有两个二进制**：桌面是同一个 `LiThermal` 程序里的一个模式，
+  入口 = 相机里的隐藏 SH 终端「进LiOS」按钮
+* **开机直接进相机**（密码界面、`--login`、`lios.conf` 全部删除，不留死代码）
+* 代码：`src/lios/lios_launcher.cpp`（桌面 + 插件框架 + 双向切换）、
+  `include/lios_launcher.h`、`include/lios_app.h`（插件 ABI）
+* **返回规则**：应用页按 菜单/录像/确认 都回桌面；桌面按菜单键回相机
+* 看门狗：UI 心跳停 3 秒 → 写日志 + `_exit(99)`，让脚本重启相机（不留死屏）
+* 使用说明 / 回滚手册 / 踩坑清单见 **`docs/LiOS_第二期_部署与回滚.md`**
 
-- `thermalcamera.sh` → `LiThermal --login` → 密码界面（LVGL）→
-  `camera` 密码跑原相机 / `lios` 密码进 LiOS 模式（本期占位桌面）/ 菜单键退出登录直接进相机
-- 不带 `--login` 启动 = 行为与改动前完全一致
-- 代码：`src/lios/lios_config.c`（读 `/mnt/UDISK/lios.conf`）、`lios_login.cpp`（密码界面）、
-  `lios_desktop.cpp`（占位桌面）；入口在 `src/main.cpp`；声明在 `include/lios_user.h`
-- 细节、使用说明、**回滚手册**见 `docs/LiOS_第一期_部署与回滚.md`
+### 必须守住的两条纪律（都踩过坑）
+1. **LVGL 事件回调 / 定时器回调里绝不 `LOCKLV()`、绝不做文件 I/O**
+   —— 事件是在 `lv_timer_handler()` 内部派发的，那时锁已经在手里；
+   非递归锁会自锁死整机（`lv_mutex` 现已改递归锁兜底），写文件实测会卡住
+2. **UI 线程（`HAL::lv_loop`）跑起来之前创建的 LVGL 定时器不会被触发**
 
-第二期接桌面时要注意的两点：
-1. 现在「从 LiOS 回相机」走的是原相机初始化 + 重启线程，不是模式切换；
-   第二期应该做成真正的模式切换（否则没法回到桌面）。
-2. `build_custom.sh` 打包用的 `thermalcamera.sh` 来自编译器仓库 `lxydiy/LiThermal_Compiler`，
-   当前 token 对它**没有写权限** → 每次重新部署固件后要把本仓库根目录的
-   `thermalcamera.sh` 单独推回相机（部署脚本只推 LiThermal 本体）。
+### 部署注意
+`build_custom.sh` 打包用的 `thermalcamera.sh` 来自编译器仓库 `lxydiy/LiThermal_Compiler`，
+当前 token 对它**没有写权限** → 每次重新部署固件后要把本仓库根目录的
+`thermalcamera.sh` 单独推回相机（部署脚本只推 LiThermal 本体）。
 

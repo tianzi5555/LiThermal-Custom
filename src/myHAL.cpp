@@ -108,7 +108,7 @@ static void encoder_read(lv_indev_drv_t *drv, lv_indev_data_t *data)
     if (lios_launcher_app_active())
         data->enc_diff = 0;
     // 主界面/相册里滚轮另有用途（数码变焦、亮度和翻页），不交给 LVGL；
-    // 其它模式（含 LiOS 的登录界面和桌面）都交给 LVGL 走焦点。
+    // 其它模式（含 LiOS 桌面）都交给 LVGL 走焦点。
     else if (current_mode != MODE_MAINPAGE && current_mode != MODE_GALLERY)
         data->enc_diff = encoder_new_move;
     else
@@ -181,15 +181,9 @@ void *thread_hal_func(void *)
 
         if (current_mode == MODE_LIOS)
         {
-            // LiOS 桌面/应用：滚轮和按键转发给 launcher（它再决定给应用还是自己导航）
+            // LiOS 桌面/应用：滚轮和按键交给 launcher
+            //（它负责「应用页 菜单/录像/确认 → 回桌面」和「桌面 菜单键 → 回相机」）
             lios_launcher_poll();
-        }
-        else if (current_mode == MODE_LOGIN)
-        {
-            // 开机密码界面由 lios_login.cpp 自己处理；这里只清掉提取出来的事件
-            last_encoder_direction = 0;
-            HAL::key_press_event[2] = false;
-            HAL::key_press_event[3] = false;
         }
         else if (current_mode == MODE_MAINPAGE)
         {

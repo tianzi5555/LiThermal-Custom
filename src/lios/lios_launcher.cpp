@@ -1,18 +1,17 @@
-// LiOS 第二期：真正的桌面 —— 方块网格 + 插件框架（dlopen）+ 双向模式切换
+// LiOS 桌面 —— 方块网格 + 插件框架（dlopen）+ 相机双向切换
 //
-// 这一版把第一期的「建设中」占位桌面换掉：
-//   * 3 列 × 3 行方块网格，一格一个应用，滚轮移动高亮、确认进入（超出可上下滚动）
+//   * 3 列方块网格，一格一个应用，滚轮移动高亮、按下进入（超出可上下滚动）
 //   * 扫描 /mnt/UDISK/apps/*.so，按 include/lios_app.h 的 ABI 读 lios_app_info，
 //     合并进网格；加载失败/缺符号/ABI 不符 → 写日志跳过，绝不让桌面崩
 //   * 选中插件 → 建全屏容器 → lios_app_create(container) → 按键转发 lios_app_key()
 //     → 退出时 lios_app_destroy() + dlclose()
-//   * 内置「文件管理器 / 设置 / 权限管理 / 后台」本期是占位页（下一期实现）
-//   * 网格里有「相机」方块 → 切回相机；相机界面里在隐藏 SH 终端按「进 LiOS」切过来
+//   * 内置「文件管理器 / 设置 / 权限管理 / 后台」目前是占位页
+//   * 网格里有「相机」方块 → 切回相机；相机界面里在隐藏 SH 终端按「进LiOS」切过来
+//   * 返回规则：应用页按 菜单/录像/确认 都回桌面；桌面按菜单键回相机
 //
 // 线程模型见 include/lios_launcher.h。
 
 #include "lios_launcher.h"
-#include "lios_user.h"
 #include "my_main.h"
 #include "statusBar.h" // ui_statusbar_create()
 #include "lios_app.h"
@@ -20,10 +19,28 @@
 #include <dirent.h>
 #include <dlfcn.h>
 #include <pthread.h>
+#include <stdarg.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
+
+// 日志固定写 /tmp（红线要求：日志不写 SD 卡）
+#define LIOS_LOG_PATH "/tmp/lios.log"
+
+void lios_log(const char *fmt, ...)
+{
+    FILE *f = fopen(LIOS_LOG_PATH, "a");
+    if (f == NULL)
+        return;
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(f, fmt, ap);
+    va_end(ap);
+    fputc('\n', f);
+    fclose(f);
+    fflush(NULL);
+}
 
 // main.cpp 里的线程（launcher 线程结束后不 join，交给 main 的 pthread_join 兜底）
 extern pthread_t thread_app;
@@ -92,20 +109,6 @@ static int g_app_index = -1;           // 正在运行的应用下标
 static bool g_enter_requested = false; // 被请求切进 LiOS
 static volatile bool g_app_exit_request = false; // 应用自己要求退出（插件用）
 static volatile bool g_camera_ready = false;     // enter_camera 是否已经把 UI 线程建出来了
-static bool g_debug_force_lios = false;          // --debug-lios 直接进桌面（调试用，跳过密码/手势）
-
-// 调试入口：`LiThermal --debug-lios` 直接进 LiOS 桌面（不用输密码）。
-// 只给开发/排查用，正常启动（thermalcamera.sh 用 --login）不受影响。
-bool lios_debug_lios_requested(int argc, char **argv)
-{
-    g_debug_force_lios = false;
-    for (int i = 1; i < argc; i++)
-        if (argv[i] != NULL && strcmp(argv[i], "--debug-lios") == 0)
-            g_debug_force_lios = true;
-    if (g_debug_force_lios)
-        lios_log("--debug-lios：跳过登录，直接进 LiOS 桌面（调试用）");
-    return g_debug_force_lios;
-}
 
 static lv_obj_t *scr_lios = NULL;      // 桌面根容器（lv_layer_sys，全屏不透明）
 static lv_obj_t *grid_cont = NULL;     // 方块网格容器
@@ -338,19 +341,15 @@ static void tile_activate(int idx)
     UNLOCKLV();
 }
 
-// ---------------------------------------------------------------- 自动测试（--debug-lios + /tmp/lios_autotest）
+// ---------------------------------------------------------------- 自动测试（/tmp/lios_autotest）
 //
-// 目的：不用人按，自己跑「进桌面 -> 打开方块 -> 心跳」，
-// 每 500ms 打一条心跳来证明 UI 线程是否还活着（用来区分「死锁卡死」和「崩溃」）。
-// 默认关闭：只有 /tmp/lios_autotest 存在 + 启动参数带 --debug-lios 才会跑。
+// 自动测试：不用人按，自己把关键路径走一遍并断言结果，用来在相机上证明
+// 「进桌面 / 打开方块 / 菜单键能返回 / 录像键也能返回 / 回相机」都正常。
+// 默认关闭：只有 /tmp/lios_autotest 存在时才跑（调试钩子，不影响正常使用）。
 
 static volatile uint32_t g_ui_beat = 0; // UI 线程每转一圈 +1（HAL::lv_loop 里喂）
-static volatile int g_autotest_step = 0; // 自动测试走到第几步
-static volatile int g_tile_open_cnt = 0; // 「打开方块」成功执行了几次
-static volatile int g_app_exit_cnt = 0;  // 「退出应用」成功执行了几次
-static volatile bool g_autotest_wanted = false; // 自动测试是否被请求（/tmp/lios_autotest 存在）
-static volatile bool g_autotest_armed_done = false; // 定时器是否已经建过
-static volatile bool g_autotest_active = false;     // 自动测试是否正在驱动（由桌面等待循环执行）
+static volatile bool g_autotest_armed_done = false; // 是否已经启动过
+static volatile bool g_autotest_active = false;     // 自动测试是否正在驱动
 
 // HAL::lv_loop 每圈调一次（myHAL.cpp）——看门狗就看这个计数器
 void lios_ui_beat(void)
@@ -358,42 +357,85 @@ void lios_ui_beat(void)
     g_ui_beat++;
 }
 
-// 自动测试的进度计数（由桌面等待循环维护，看门狗负责打日志）
+static bool lios_app_running(void)
+{
+    return g_app_running;
+}
 
 void lios_autotest_start(void)
 {
     if (access("/tmp/lios_autotest", F_OK) != 0)
         return;
     lios_log("=== autotest 已启用（/tmp/lios_autotest 存在）===");
-    // 这里**只登记意图**，真正的 lv_timer_create 交给 HAL 线程在桌面显示期间做
-    //（必须等 UI 线程跑起来；实测 UI 线程起来之前建的 LVGL 定时器不会被触发）
-    g_autotest_wanted = true;
+    g_autotest_active = true;
 }
 
-// 由看门狗线程 / HAL 线程在 UI 线程跑起来之后调用（用互斥锁保证只做一次；
-// 两个线程都会来调，不加锁会重复建定时器 → 自动测试步骤被执行两次）
-static pthread_mutex_t g_autotest_lock = PTHREAD_MUTEX_INITIALIZER;
-static void autotest_arm_timers(void)
+// 自动测试状态机（每 500ms 一步；在 launcher 线程里跑，写日志安全）
+static void autotest_tick(int step)
 {
-    pthread_mutex_lock(&g_autotest_lock);
-    if (g_autotest_armed_done)
-    {
-        pthread_mutex_unlock(&g_autotest_lock);
-        return;
-    }
-    // 每次 arm 都重新确认一次标志文件（不依赖主线程那次 access 的时序）
-    if (access("/tmp/lios_autotest", F_OK) != 0 && !g_autotest_wanted)
-    {
-        pthread_mutex_unlock(&g_autotest_lock);
-        return;
-    }
-    g_autotest_armed_done = true;
-    pthread_mutex_unlock(&g_autotest_lock);
+    static bool ok_menu_back = false, ok_rec_back = false;
+    bool running = lios_app_running();
 
-    // 不用 LVGL 定时器：实测在「UI 线程起来之前/边缘」建的定时器不可靠。
-    // 自动测试直接由 lios_launcher_screen 的等待循环驱动（那个循环本来就在跑）。
-    g_autotest_active = true;
-    lios_log("autotest: 已启动（3 秒后自动打开第一个方块，再 3 秒后退出应用）");
+    lios_log("autotest 步骤 %d：desktop=%d app=%d", step, g_active ? 1 : 0, running ? 1 : 0);
+
+    if (step == 1)
+    {
+        lios_log("autotest: 进入 LiOS 桌面");
+        lios_enter();
+    }
+    else if (step == 2)
+    {
+        lios_log("autotest: 断言进入桌面 -> %s", g_active ? "OK" : "失败");
+    }
+    else if (step == 3)
+    {
+        lios_log("autotest: 打开方块 idx=1（文件管理占位页）");
+        if (g_active)
+            tile_activate(1);
+    }
+    else if (step == 4)
+    {
+        bool ok = lios_app_running();
+        lios_log("autotest: 断言应用已打开 -> %s", ok ? "OK" : "失败");
+    }
+    else if (step == 5)
+    {
+        lios_log("autotest: 模拟按菜单键（走真实按键通路 key_press_event[1]）");
+        LOCKLV();
+        HAL::key_press_event[1] = true;
+        UNLOCKLV();
+    }
+    else if (step == 6)
+    {
+        ok_menu_back = !lios_app_running();
+        lios_log("autotest: 断言菜单键回到桌面 -> %s", ok_menu_back ? "OK" : "失败");
+        lios_log("autotest: 再打开一次方块 idx=1");
+        if (g_active)
+            tile_activate(1);
+    }
+    else if (step == 7)
+    {
+        lios_log("autotest: 模拟按录像键");
+        LOCKLV();
+        HAL::key_press_event[2] = true;
+        UNLOCKLV();
+    }
+    else if (step == 8)
+    {
+        ok_rec_back = !lios_app_running();
+        lios_log("autotest: 断言录像键也能回到桌面 -> %s", ok_rec_back ? "OK" : "失败");
+        lios_log("autotest: 模拟按菜单键回相机");
+        LOCKLV();
+        HAL::key_press_event[1] = true;
+        UNLOCKLV();
+    }
+    else if (step == 9)
+    {
+        lios_log("autotest: 断言已退出桌面（回相机）-> %s", g_active ? "失败" : "OK");
+        lios_log("=== autotest 结束：菜单键返回=%s，录像键返回=%s ===",
+                 ok_menu_back ? "OK" : "失败", ok_rec_back ? "OK" : "失败");
+        g_autotest_active = false;
+    }
 }
 
 // ---------------------------------------------------------------- 看门狗
@@ -412,19 +454,11 @@ static void *lios_watchdog_thread(void *)
 {
     uint32_t last = g_ui_beat;
     int stuck = 0;
-    int tick = 0;
-    // 等 UI 线程跑起来，再把自动测试的定时器建出来
-    // （同样是因为「UI 线程起来之前建的 LVGL 定时器不会触发」这个坑）
-    usleep(2000 * 1000);
-    autotest_arm_timers();
     while (!g_wd_stop)
     {
         usleep(500 * 1000);
         if (g_wd_stop)
             break;
-        if (g_autotest_wanted && ++tick % 4 == 0) // 自动测试时才每 2 秒报一次进度
-            lios_log("看门狗: ui_beat=%u step=%d tile_open=%d app_exit=%d",
-                     (unsigned)g_ui_beat, g_autotest_step, g_tile_open_cnt, g_app_exit_cnt);
         if (g_ui_beat == last)
         {
             stuck++;
@@ -695,49 +729,18 @@ void lios_launcher_screen(void)
 
     g_active = true;
 
-    // 等退出：菜单键（且没有应用在跑）或者「相机」方块
-    int at_tick = 0; // 自动测试计时（每轮 20ms）
+    // 等退出：g_quit 由两处设置 —— 菜单键（lios_launcher_poll → lios_go_back_once）
+    // 或者点了「相机」方块（tile_activate_locked）。
+    // 这里不再自己读按键，避免和 HAL 线程的 poll 抢同一个事件。
+    int at_tick = 0; // 自动测试计时（每轮 20ms，500ms 一步）
     while (!g_quit)
     {
-        bool menu = false;
-        LOCKLV();
-        if (HAL::key_press_event[1])
-        {
-            HAL::key_press_event[1] = false;
-            menu = true;
-        }
-        UNLOCKLV();
-        if (menu && !g_app_running)
-        {
-            lios_log("桌面：菜单键 -> 回相机");
-            g_quit = true;
-        }
-
-        // 自动测试（默认关闭）：3 秒后打开第一个方块，再 3 秒后退出应用
+        // 自动测试（默认关闭，只有 /tmp/lios_autotest 存在时才跑）
         if (g_autotest_active)
         {
-            at_tick++;
-            if (at_tick == 150 && !g_app_running)
-            {
-                lios_log("autotest: 打开第一个方块");
-                tile_activate(1);
-                g_autotest_step = 1;
-                g_tile_open_cnt++;
-                lios_log("autotest: 打开方块完成（app_running=%d）", g_app_running ? 1 : 0);
-            }
-            else if (at_tick == 300 && g_app_running)
-            {
-                lios_log("autotest: 退出应用");
-                app_exit();
-                g_autotest_step = 2;
-                g_app_exit_cnt++;
-                lios_log("autotest: 退出应用完成（app_running=%d）", g_app_running ? 1 : 0);
-                g_autotest_active = false;
-                g_autotest_step = 3;
-                lios_log("autotest: 全部完成（UI 线程全程存活）");
-            }
+            if (++at_tick % 25 == 0) // 每 500ms 推进一步
+                autotest_tick(at_tick / 25);
         }
-
         usleep(20000);
     }
 
@@ -832,70 +835,98 @@ void lios_app_request_exit(void)
     g_app_exit_request = true;
 }
 
-// ---------------------------------------------------------------- 按键转发
+// ---------------------------------------------------------------- 统一的「返回上一级」
+//
+// 规则（用户要求：每个页面都要能按菜单键回上一级，绝不允许按键无反应）：
+//   * 应用页  → 菜单键 / 录像键 / 波轮确认键 都回桌面
+//   * 桌面    → 菜单键 回相机（录像键/确认键不抢，确认键留给「进入方块」）
+// 这些键在 HAL 线程的 lios_launcher_poll() 里消费，所以一定有人处理，绝不丢按键。
+
+// 回上一级（HAL 线程调用，自己加锁）；返回 true 表示这次按键被「返回」吃掉了
+static bool lios_go_back_once(const char *who)
+{
+    if (!g_active)
+        return false;
+
+    if (g_app_running)
+    {
+        lios_log("返回：%s → 退出应用回桌面", who);
+        app_exit(); // 内部自己加锁；绝不在 LVGL 回调里做
+        return true;
+    }
+
+    // 桌面上：只有菜单键算返回
+    if (strcmp(who, "菜单键") == 0)
+    {
+        lios_log("返回：菜单键 → 回相机");
+        g_quit = true;
+        return true;
+    }
+    return false;
+}
 
 void lios_launcher_poll(void)
 {
     if (!g_active)
         return;
 
-    // 自动测试：HAL 线程每圈顺手确认一次标志文件（这里调 lv_timer_create 时 UI 线程一定在跑，
-    // 定时器才会被触发；arm 内部有一次性保护，不会重复建）
-    if (!g_autotest_armed_done)
-    {
-        static int arm_check = 0;
-        if (++arm_check >= 20)
-        {
-            arm_check = 0;
-            autotest_arm_timers();
-        }
-    }
+    // 先把三个「返回键」事件取出来（取出来就必须处理，不允许丢掉）
+    LOCKLV();
+    bool back_ev = HAL::key_press_event[1]; // 菜单键
+    if (back_ev)
+        HAL::key_press_event[1] = false;
+    bool rec_ev = HAL::key_press_event[2]; // 录像键
+    if (rec_ev)
+        HAL::key_press_event[2] = false;
+    bool enter_ev = HAL::key_press_event[3]; // 波轮按下（确认）
+    if (enter_ev)
+        HAL::key_press_event[3] = false;
+    int enc = last_encoder_direction;
+    last_encoder_direction = 0;
+    UNLOCKLV();
 
-    // 有应用在跑：滚轮/确认/录像/菜单 全部转发给应用
+    // 返回优先级最高：应用页里 菜单/录像/确认 都能回桌面
     if (g_app_running)
     {
-        // 插件自己要求退出（例如内置的返回按钮）：由这边统一收尾
-        if (g_app_exit_request)
+        if (g_app_exit_request) // 插件自己要求退出
         {
+            lios_log("返回：应用请求退出");
             app_exit();
             return;
         }
+        if (back_ev && lios_go_back_once("菜单键"))
+            return;
+        if (rec_ev && lios_go_back_once("录像键"))
+            return;
+        if (enter_ev && lios_go_back_once("确认键"))
+            return;
 
-        LOCKLV();
-        int enc = last_encoder_direction;
-        last_encoder_direction = 0;
-        bool enter_ev = HAL::key_press_event[3];
-        if (enter_ev)
-            HAL::key_press_event[3] = false;
-        bool rec_ev = HAL::key_press_event[2];
-        if (rec_ev)
-            HAL::key_press_event[2] = false;
-        UNLOCKLV();
-
+        // 没被返回吃掉的事件再转发给应用（插件可能想处理滚轮/录像）
         if (enc > 0)
             plugin_key(LIOS_KEY_UP, LIOS_EV_PRESS);
         else if (enc < 0)
             plugin_key(LIOS_KEY_DOWN, LIOS_EV_PRESS);
-
-        if (enter_ev)
-        {
-            plugin_key(LIOS_KEY_ENTER, LIOS_EV_PRESS);
-            plugin_key(LIOS_KEY_ENTER, LIOS_EV_RELEASE);
-        }
         if (rec_ev)
         {
             plugin_key(LIOS_KEY_REC, LIOS_EV_PRESS);
             plugin_key(LIOS_KEY_REC, LIOS_EV_RELEASE);
         }
+        if (enter_ev)
+        {
+            plugin_key(LIOS_KEY_ENTER, LIOS_EV_PRESS);
+            plugin_key(LIOS_KEY_ENTER, LIOS_EV_RELEASE);
+        }
+        return;
     }
-    else
+
+    // 桌面上：菜单键 → 回相机；滚轮交给 LVGL 走焦点；确认键由 LVGL 发给选中的方块
+    if (back_ev)
     {
-        // 桌面上：滚轮交给 LVGL 走焦点（myHAL.cpp: encoder_read 的判断），
-        // 这里只需要清掉 HAL 跟踪用的方向，别让它泄到别的模式
-        LOCKLV();
-        last_encoder_direction = 0;
-        UNLOCKLV();
+        lios_go_back_once("菜单键");
+        return;
     }
+    if (rec_ev)
+        lios_log("桌面：录像键无动作（返回请按菜单键）");
 }
 
 // ---------------------------------------------------------------- 相机启动（幂等）

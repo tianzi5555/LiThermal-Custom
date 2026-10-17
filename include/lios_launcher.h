@@ -1,17 +1,21 @@
 #pragma once
-// LiOS 第二期：真正的桌面（方块网格 + 插件框架 + 双向模式切换）
+// LiOS 桌面：方块网格 + 插件框架（dlopen）+ 相机双向切换
 //
-// 和第一期（同一个程序里的两种顶层模式）的关系：
-//   * 第一期：登录界面 +「相机 / LiOS」二选一，进了 LiOS 只能回相机、要再进得重启程序
-//   * 第二期：桌面变成方块网格，能从相机切进 LiOS、也能从 LiOS 切回相机（双向、不用重启）
+// 入口：相机 → 隐藏 SH 终端（系统设置 → 手动清除噪声 → 录像键）→ 右上角「进LiOS」
+// 退出：桌面按菜单键 / 选「相机」方块 → 回相机；应用页按 菜单/录像/确认 → 回桌面
 //
 // 线程模型（重要）：
 //   * `lios_enter()` 只负责**起一个 launcher 线程**，自己马上返回 ——
-//     这样 HAL 线程（隐藏终端里按「进 LiOS」）不会被桌面阻塞。
+//     这样 HAL 线程（隐藏终端里按「进LiOS」）不会被桌面阻塞。
 //   * launcher 线程跑 `lios_launcher_screen()`（建桌面 + 等按键），退出后再调
 //     `enter_camera()` 把相机线程拉起来，然后线程结束。
 //   * 桌面里所有 LVGL 操作都在 LOCKLV()/UNLOCKLV() 里（HAL 线程也会碰 LVGL）。
 //   * 插件跑不动/加载失败一律只写 /tmp/lios.log 并跳过，绝不让桌面崩。
+//
+// 两个必须守住的纪律（都踩过坑）：
+//   1) LVGL 事件回调 / LVGL 定时器回调里**绝不 LOCKLV、绝不做文件 I/O**
+//      （事件是在 lv_timer_handler 内部派发的，那时锁已在手里；写文件实测会卡住）
+//   2) UI 线程（HAL::lv_loop）跑起来之前创建的 LVGL 定时器不会被触发
 
 #include <stdbool.h>
 
@@ -20,13 +24,13 @@ extern "C"
 {
 #endif
 
+    /// @brief LiOS 日志（固定写 /tmp/lios.log，不写 SD 卡）
+    void lios_log(const char *fmt, ...);
+
     /// @brief 切到 LiOS 模式（起 launcher 线程；已经在 LiOS 里则什么都不做）
     void lios_enter(void);
 
-    /// @brief 调试入口：`LiThermal --debug-lios` 直接进桌面（跳过登录），返回是否命中
-    bool lios_debug_lios_requested(int argc, char **argv);
-
-    /// @brief 启动自动测试（只有 /tmp/lios_autotest 存在时才真的跑）
+    /// @brief 启动自动测试（只有 /tmp/lios_autotest 存在时才真的跑；调试钩子）
     void lios_autotest_start(void);
 
     /// @brief 启动看门狗：UI 心跳停 3 秒 → 写日志 + _exit(99)，让脚本重启相机
@@ -40,15 +44,13 @@ extern "C"
     /// @brief 当前是不是 LiOS 桌面在显示（= 相机线程应该待机）
     bool lios_mode_active(void);
 
-    /// @brief main 用：UI 线程（HAL::lv_loop）是不是已经建出来了。
-    /// LiOS 启动路径下 UI 线程是 launcher 线程建的，main 不能直接
-    /// pthread_join(thread_ui)（有 join 到 0 的风险），要先等这个为真。
+    /// @brief main 用：UI 线程（HAL::lv_loop）是不是已经建出来了（避免 pthread_join(0)）
     bool lios_camera_ready(void);
 
-    /// @brief 当前有没有应用占着屏幕（有的话滚轮/确认要转发给应用，桌面不吞）
+    /// @brief 当前有没有应用占着屏幕（有的话滚轮/按键要转发给应用，桌面不吞）
     bool lios_launcher_app_active(void);
 
-    /// @brief 每帧调用（HAL 线程，MODE_LIOS 分支里）：按键/滚轮转发 + 桌面导航
+    /// @brief 每帧调用（HAL 线程，MODE_LIOS 分支里）：按键/滚轮转发 + 返回上一级
     void lios_launcher_poll(void);
 
     /// @brief 应用想自己退出（插件调用）：只置个标记，真正的退出由桌面线程做，
