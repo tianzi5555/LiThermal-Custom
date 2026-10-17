@@ -67,7 +67,7 @@ static bool s_res_ready = false;
 static char s_status[160];            // 状态/错误（worker 写，UI 读）
 static bool s_status_dirty = false;
 // 执行 .sh 脚本的输出（worker 写，UI 读）
-#define SH_OUT_MAX 4000
+#define SH_OUT_MAX 32000 // 脚本输出缓冲 32KB（之前 4KB 会截断长输出）
 static char s_sh_out[SH_OUT_MAX];
 static bool s_sh_ready = false;   // 结果卡片是否该显示（执行一开始就 true）
 static bool s_sh_running = false; // 脚本还在跑
