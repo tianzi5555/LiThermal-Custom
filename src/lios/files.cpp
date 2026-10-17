@@ -266,7 +266,12 @@ static void card_close(void)
     s_card_cb = NULL;
     for (int i = 0; i < MAX_ROWS; i++)
         if (s_rows[i] != NULL && lv_obj_is_valid(s_rows[i]))
-            lv_obj_add_flag(s_rows[i], LV_OBJ_FLAG_CLICK_FOCUSABLE);
+        {
+            if (i < s_shown)
+                lv_obj_add_flag(s_rows[i], LV_OBJ_FLAG_CLICK_FOCUSABLE);
+            else
+                lv_obj_clear_flag(s_rows[i], LV_OBJ_FLAG_CLICK_FOCUSABLE); // 隐藏行永不参与焦点
+        }
     if (s_shown > 0 && s_rows[0] != NULL && lv_obj_is_valid(s_rows[0]))
         lv_group_focus_obj(s_rows[(s_sel >= 0 && s_sel < s_shown) ? s_sel : 0]);
 }
@@ -392,6 +397,31 @@ static void card_action_cb(int idx)
 }
 
 // ---------------------------------------------------------------- 行回调
+// 回到上一级：把路径最后一个分量去掉并做基本规整（不产生 /a/b/.. 这种累加）
+static void go_parent(void)
+{
+    char up[PATH_MAX_LEN];
+    snprintf(up, sizeof(up), "%s", s_cwd);
+    int n = (int)strlen(up);
+    while (n > 1 && up[n - 1] == '/')
+        up[--n] = 0; // 去掉尾部斜杠
+    char *slash = strrchr(up, '/');
+    if (slash != NULL)
+    {
+        if (slash == up)
+            up[1] = 0; // 到根
+        else
+            *slash = 0;
+    }
+    // 规整掉尾部的 "/."、"//" 之类
+    n = (int)strlen(up);
+    while (n > 1 && (up[n - 1] == '/' || up[n - 1] == '.'))
+        up[--n] = 0;
+    if (up[0] == 0)
+        snprintf(up, sizeof(up), "/");
+    ui_scan(up);
+}
+
 static void row_click_cb(lv_event_t *e)
 {
     lv_obj_t *row = lv_event_get_target(e);
@@ -399,6 +429,13 @@ static void row_click_cb(lv_event_t *e)
     if (idx < 0 || idx >= s_shown)
         return;
     s_sel = idx;
+
+    // ".." 就是返回上级（不是把它当成目录名往路径后面接）
+    if (strcmp(s_names[idx], "..") == 0)
+    {
+        go_parent();
+        return;
+    }
 
     if (s_isdir[idx])
     {
@@ -481,7 +518,9 @@ static void ui_build_rows(void)
             s_size[i] = res[i].size;
 
             char text[320];
-            if (res[i].is_dir)
+            if (strcmp(res[i].name, "..") == 0)
+                snprintf(text, sizeof(text), "..   返回上级"); // 讲清楚它是干什么的
+            else if (res[i].is_dir)
                 snprintf(text, sizeof(text), "%s/", res[i].name);
             else
             {
@@ -491,10 +530,16 @@ static void ui_build_rows(void)
             }
             lv_label_set_text(s_row_lbl[i], text);
             lv_obj_clear_flag(s_rows[i], LV_OBJ_FLAG_HIDDEN);
+            // 只有真正显示出来的行才允许被滚轮聚焦（否则焦点会跑到屏幕外的隐藏行）
+            lv_obj_add_flag(s_rows[i], LV_OBJ_FLAG_CLICK_FOCUSABLE);
+            lv_obj_add_flag(s_rows[i], LV_OBJ_FLAG_SCROLL_ON_FOCUS);
         }
         else
         {
             lv_obj_add_flag(s_rows[i], LV_OBJ_FLAG_HIDDEN);
+            // 关键修复：隐藏的行必须同时取消可聚焦，否则滚轮往上/下会「选中框消失」
+            lv_obj_clear_flag(s_rows[i], LV_OBJ_FLAG_CLICK_FOCUSABLE);
+            lv_obj_clear_flag(s_rows[i], LV_OBJ_FLAG_SCROLL_ON_FOCUS);
             s_names[i][0] = 0;
             s_isdir[i] = false;
             s_size[i] = 0;
@@ -535,17 +580,7 @@ static bool page_key(int key)
         }
         if (strcmp(s_cwd, START_DIR) == 0 || strcmp(s_cwd, "/") == 0 || s_cwd[0] == 0)
             return false; // 交回桌面 → 桌面关页面
-        char up[PATH_MAX_LEN];
-        snprintf(up, sizeof(up), "%s", s_cwd);
-        char *slash = strrchr(up, '/');
-        if (slash != NULL)
-        {
-            if (slash == up)
-                up[1] = 0;
-            else
-                *slash = 0;
-        }
-        ui_scan(up);
+        go_parent();
         return true;
     }
     if (key == LIOS_K_REC)
@@ -560,13 +595,15 @@ static bool page_key(int key)
     }
     if (key == LIOS_K_ENTER)
     {
-        if (s_card != NULL || s_kb != NULL)
-            return true;
-        if (s_shown <= 0)
-            return true;
-        lv_obj_t *f = lv_group_get_focused(lv_group_get_default());
-        if (f != NULL && lv_obj_is_valid(f))
-            lv_event_send(f, LV_EVENT_CLICKED, NULL);
+        // 关键：确认键**不要**自己发 CLICKED ✗ ——
+        // 桌面把 wheel_focus 页面的确认键留给 LVGL，由编码器输入自动点击当前焦点对象。
+        // 我们再发一次就会「按一下点两下」（用户实测就是这个现象）。
+        // 这里只做节流，防止硬件抖动造成连点。
+        static uint32_t last_ms = 0;
+        uint32_t now = lv_tick_get();
+        if (now - last_ms < 200)
+            return true; // 抖动窗口内吞掉
+        last_ms = now;
         return true;
     }
     return false;
@@ -637,7 +674,10 @@ void page_files_create(lv_obj_t *parent)
     s_list = lv_obj_create(parent);
     lv_obj_set_size(s_list, 316, LIST_H);
     lv_obj_set_pos(s_list, 2, LIST_Y);
-    lv_obj_clear_flag(s_list, LV_OBJ_FLAG_SCROLLABLE);
+    // 关键修复：列表必须可滚动，SCROLL_ON_FOCUS 才能在焦点超出可视区时把列表带动
+    lv_obj_add_flag(s_list, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(s_list, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(s_list, LV_SCROLLBAR_MODE_AUTO);
     lv_obj_set_style_bg_opa(s_list, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_border_width(s_list, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_pad_all(s_list, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
