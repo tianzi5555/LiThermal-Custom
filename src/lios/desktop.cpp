@@ -21,14 +21,14 @@
 #include <string.h>
 
 // ---------------------------------------------------------------- 网格尺寸（320x240）
-#define GRID_COLS 3
-#define GRID_ROWS 3
-#define PER_PAGE (GRID_COLS * GRID_ROWS) // 每页 9 个
-#define TILE_W 84
-#define TILE_H 56
+#define GRID_COLS 6
+#define GRID_ROWS 6
+#define PER_PAGE (GRID_COLS * GRID_ROWS) // 每页 36 个（方块缩小一倍）
+#define TILE_W 42
+#define TILE_H 28
 #define TILE_GAP_X 4
-#define TILE_GAP_Y 6
-#define GRID_X 30                    // 3*84 + 2*4 = 260；(320-260)/2 = 30
+#define TILE_GAP_Y 4
+#define GRID_X 24                    // 6*42 + 5*4 = 272；(320-272)/2 = 24
 #define GRID_Y 24
 #define GRID_H 200
 #define PAGE_W 320                   // 每页宽 = 屏宽
@@ -352,9 +352,9 @@ static void build_grid(void)
 
             lv_obj_t *ic = lv_label_create(t);
             lv_label_set_text(ic, app->icon != NULL ? app->icon : "?");
-            lv_obj_set_style_text_font(ic, &ui_font_cn16, LV_PART_MAIN | LV_STATE_DEFAULT);
+            lv_obj_set_style_text_font(ic, &ui_font_cn12, LV_PART_MAIN | LV_STATE_DEFAULT);
             lv_obj_set_style_text_color(ic, lv_color_hex(0x69C0FF), LV_PART_MAIN | LV_STATE_DEFAULT);
-            lv_obj_align(ic, LV_ALIGN_TOP_MID, 0, 6);
+            lv_obj_align(ic, LV_ALIGN_TOP_MID, 0, 1);
 
             lv_obj_t *nm = lv_label_create(t);
             lv_obj_set_width(nm, TILE_W - 8);
@@ -363,7 +363,7 @@ static void build_grid(void)
             lv_label_set_text(nm, app->name != NULL ? app->name : "?");
             lv_obj_set_style_text_font(nm, &ui_font_cn12, LV_PART_MAIN | LV_STATE_DEFAULT);
             lv_obj_set_style_text_color(nm, lv_color_hex(0xE8EEF4), LV_PART_MAIN | LV_STATE_DEFAULT);
-            lv_obj_align(nm, LV_ALIGN_BOTTOM_MID, 0, -6);
+            lv_obj_align(nm, LV_ALIGN_BOTTOM_MID, 0, -2);
 
             lv_obj_set_user_data(t, (void *)(intptr_t)i);
             lv_obj_add_event_cb(t, tile_click_cb, LV_EVENT_CLICKED, NULL);
