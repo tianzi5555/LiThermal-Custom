@@ -15,6 +15,9 @@ extern "C"
 {
 #endif
 
+    // 启动时调一次：起 worker 并把所有应用的权限记录读进来
+    void lios_perm_init(void);
+
     bool lios_perm_allowed(const char *id, const char *key);
 
 #ifdef __cplusplus

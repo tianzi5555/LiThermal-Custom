@@ -76,6 +76,12 @@ bool lios_perm_allowed(const char *id, const char *key)
     if (id == NULL || key == NULL)
         return false;
     pthread_mutex_lock(&s_mtx);
+    if (!s_loaded)
+    {
+        // 记录还没读进来：放行（宁可不管，也不能因为没数据把应用全锁死）
+        pthread_mutex_unlock(&s_mtx);
+        return true;
+    }
     int idx = find_rec_locked(id);
     bool ok = false;
     if (idx >= 0)
@@ -226,6 +232,12 @@ static void perm_worker_start(void)
     pthread_mutex_unlock(&s_mtx);
 }
 
+// 启动时调用（main 里）：起 worker 并加载权限记录
+void lios_perm_init(void)
+{
+    perm_worker_start();
+}
+
 // ---------------- 行池 / 渲染
 static void row_pool(void)
 {
@@ -287,7 +299,7 @@ static void ui_rebuild(void)
         if (s_title != NULL && lv_obj_is_valid(s_title))
             lv_label_set_text(s_title, "权限管理（确认=进入）");
         if (s_hint != NULL && lv_obj_is_valid(s_hint))
-            lv_label_set_text(s_hint, "第一版只记录与展示，不做强制拦截");
+            lv_label_set_text(s_hint, "已强制：相机启动/文件管理/插件启动");
     }
     else
     {

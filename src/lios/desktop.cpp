@@ -13,6 +13,7 @@
 // 插件扫描在 apps.cpp 的 worker 线程里做，这里只是每帧比一下版本号。
 
 #include "lios.h"
+#include "lios_perm.h"
 #include "lios_app.h" // 插件按键枚举（LIOS_KEY_* / LIOS_EV_*）
 
 #include <stdint.h>
@@ -137,11 +138,44 @@ static lv_obj_t *make_page(void)
     return p;
 }
 
+// 权限拦截：真正生效的地方
+//   camera  -> 需要 camera 权限（关掉后点相机方块直接被拒，不起进程）
+//   files   -> 需要 storage 权限
+//   插件    -> 需要 storage 权限（插件要读资源）
+//   settings/perm/tasks -> 不需要权限
+static const char *need_perm_for(int idx)
+{
+    const lios_app_def_t *app = lios_apps_get(idx);
+    if (app == NULL)
+        return NULL;
+    if (strcmp(app->id, "camera") == 0)
+        return "camera";
+    if (strcmp(app->id, "files") == 0)
+        return "storage";
+    if (lios_apps_is_plugin(idx))
+        return "storage";
+    return NULL;
+}
+
 static void desktop_open(int idx)
 {
     const lios_app_def_t *app = lios_apps_get(idx);
     if (app == NULL)
         return;
+
+    // ---- 权限检查（真拦截）----
+    {
+        const char *need = need_perm_for(idx);
+        if (need != NULL && !lios_perm_allowed(app->id, need))
+        {
+            char msg[180];
+            snprintf(msg, sizeof(msg), "%s 缺少「%s」权限，已拒绝启动",
+                     app->name, strcmp(need, "camera") == 0 ? "相机与视频" : "读写存储");
+            lios_log("权限拦截：%s 需要 %s -> 拒绝", app->id, need);
+            set_hint(msg);
+            return;
+        }
+    }
 
     // 「相机」= fork + exec 真正的相机程序（不是页面）
     if (strcmp(app->id, "camera") == 0)

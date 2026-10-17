@@ -8,6 +8,7 @@
 //   4) 看门狗：UI 心跳停 3 秒 → 写日志 + _exit(99)，让启动脚本重新拉起来
 
 #include "lios.h"
+#include "lios_perm.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -143,6 +144,12 @@ static void *lios_camera_thread(void *)
 
 void lios_launch_camera(void)
 {
+    // 双保险：即使有人绕过桌面直接调这里，也再查一次权限
+    if (!lios_perm_allowed("camera", "camera"))
+    {
+        lios_log("权限拦截（兜底）：相机缺少 camera 权限，拒绝启动");
+        return;
+    }
     if (s_child_running)
     {
         lios_log("相机：已经在运行，忽略本次点击");
@@ -444,6 +451,7 @@ int main(void)
 
     // 扫描 /mnt/UDISK/apps/*.so 与 /mnt/UDISK/*.so（后台线程做，UI 线程绝不做 I/O）
     lios_apps_scan_start();
+    lios_perm_init(); // 启动就加载权限记录（拦截要用）
 
     pthread_t t;
     if (pthread_create(&t, NULL, lios_thread_encoder, NULL) == 0)
