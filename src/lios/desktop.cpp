@@ -394,15 +394,12 @@ static void goto_page(int page)
     int first = page * PER_PAGE;
     if (first >= s_total)
         first = 0;
+    // 整页翻页：直接滚到页面边界（不能用 scroll_to_view，那只会把焦点滚进视野，
+    // 焦点在右边那列就只滚到右边一半 -> 用户看到的"翻一半"）
+    if (s_grid != NULL && lv_obj_is_valid(s_grid))
+        lv_obj_scroll_to_x(s_grid, page * PAGE_W, LV_ANIM_ON);
     if (s_tiles[first] != NULL && lv_obj_is_valid(s_tiles[first]))
-    {
         lv_group_focus_obj(s_tiles[first]);
-        lv_obj_scroll_to_view(s_tiles[first], LV_ANIM_OFF);
-    }
-    else
-    {
-        lv_obj_scroll_to_x(s_grid, page * PAGE_W, LV_ANIM_OFF);
-    }
     s_shown_page = page;
     set_page_label(page);
 }
