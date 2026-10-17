@@ -74,6 +74,8 @@ static bool s_sh_running = false; // 脚本还在跑
 static bool s_sh_done = false;    // 脚本结束（正常/超时都算）
 static int s_sh_exit = -1;        // 退出码（超时= -2）
 static long s_sh_pos = 0;         // 已读到输出的字节位置
+static char s_sh_raw[SH_OUT_MAX];  // 原始字节流（未过滤，终端样式由 sh_term_filter 生成）
+static size_t s_sh_raw_len = 0;
 static char s_sh_name[NAME_MAX_LEN];
 static lv_obj_t *s_sh_label = NULL;   // 结果卡片里的输出 label（tick 刷新用）
 static lv_obj_t *s_sh_card = NULL;    // 结果卡片容器
