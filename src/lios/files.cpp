@@ -185,19 +185,16 @@ static void *sh_monitor(void *arg)
     const char *arg2 = pp[1];
     const char *outf = "/tmp/files_sh.out";
 
-    // 命令：把子进程输出重定向到文件，并用 while read 强制"逐行"写
-    //（子进程自己的 stdio 可能是块缓冲（4KB），while read 会把每行拆出来立刻写，
-    //   这样监控线程就能 50ms 轮询到实时输出；没有管道，也就没有读竞态）
-    char cmd[PATH_MAX_LEN + 200];
+    // 直接重定向到文件（busybox 的 echo 是内建、直接 write，天然逐行实时；
+    // 外部命令（cat 等）即使块缓冲，脚本结束时也会完整落盘 -> 输出不会丢）
+    char cmd[PATH_MAX_LEN + 120];
     if (arg2 != NULL && strcmp(arg2, "cat") == 0)
-        snprintf(cmd, sizeof(cmd),
-                 "(cat '%s') | (while IFS= read -r l; do echo \"$l\"; done)", path);
+        snprintf(cmd, sizeof(cmd), "cat '%s'", path);
     else
-        snprintf(cmd, sizeof(cmd),
-                 "(sh '%s') 2>&1 | (while IFS= read -r l; do echo \"$l\"; done)", path);
+        snprintf(cmd, sizeof(cmd), "sh '%s'", path);
 
-    char full[PATH_MAX_LEN + 240];
-    snprintf(full, sizeof(full), "%s > %s 2>&1", cmd, outf);
+    char full[PATH_MAX_LEN + 160];
+    snprintf(full, sizeof(full), "(%s) > %s 2>&1", cmd, outf);
 
     unlink(outf);
     pid_t pid = fork();
@@ -247,8 +244,8 @@ static void *sh_monitor(void *arg)
                 child_done = true;
                 break;
             }
-            usleep(50000);
-            waited += 50;
+            usleep(30000);
+            waited += 30;
         }
         if (waited >= 15000)
         {
