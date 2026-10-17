@@ -371,6 +371,8 @@ void lios_autotest_start(void)
 }
 
 // 自动测试状态机（每 500ms 一步；在 launcher 线程里跑，写日志安全）
+// 注意：开机后相机才是主界面，所以第 1 步要自己「进 LiOS」
+//（等价于用户按隐藏终端里的「进LiOS」；这里只做模式切换那一半）
 static void autotest_tick(int step)
 {
     static bool ok_menu_back = false, ok_rec_back = false;
@@ -380,7 +382,8 @@ static void autotest_tick(int step)
 
     if (step == 1)
     {
-        lios_log("autotest: 进入 LiOS 桌面");
+        lios_log("autotest: 进入 LiOS 桌面（模拟「进LiOS」）");
+        current_mode = MODE_LIOS;
         lios_enter();
     }
     else if (step == 2)
@@ -454,11 +457,16 @@ static void *lios_watchdog_thread(void *)
 {
     uint32_t last = g_ui_beat;
     int stuck = 0;
+    int at_tick = 0; // 自动测试计时（每 500ms 一步）
     while (!g_wd_stop)
     {
         usleep(500 * 1000);
         if (g_wd_stop)
             break;
+        // 自动测试（默认关闭）：由这个普通线程驱动 —— 开机在相机界面时也能自己进桌面验证，
+        // 桌面里的等待循环只负责显示，不需要参与测试
+        if (g_autotest_active)
+            autotest_tick(++at_tick);
         if (g_ui_beat == last)
         {
             stuck++;
@@ -732,17 +740,8 @@ void lios_launcher_screen(void)
     // 等退出：g_quit 由两处设置 —— 菜单键（lios_launcher_poll → lios_go_back_once）
     // 或者点了「相机」方块（tile_activate_locked）。
     // 这里不再自己读按键，避免和 HAL 线程的 poll 抢同一个事件。
-    int at_tick = 0; // 自动测试计时（每轮 20ms，500ms 一步）
     while (!g_quit)
-    {
-        // 自动测试（默认关闭，只有 /tmp/lios_autotest 存在时才跑）
-        if (g_autotest_active)
-        {
-            if (++at_tick % 25 == 0) // 每 500ms 推进一步
-                autotest_tick(at_tick / 25);
-        }
         usleep(20000);
-    }
 
     // 收尾：先退应用，再删桌面
     if (g_app_running)
