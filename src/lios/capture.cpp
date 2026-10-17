@@ -22,7 +22,7 @@ extern uint32_t lios_fb_w(void);
 extern uint32_t lios_fb_h(void);
 extern void lios_lock_display(void);
 extern void lios_unlock_display(void);
-extern void lios_log(const char *fmt, ...);
+extern "C" void lios_log(const char *fmt, ...); // lios_log 是 C 链接
 
 static const char *kDir = "/mnt/UDISK/Screenshots";
 
