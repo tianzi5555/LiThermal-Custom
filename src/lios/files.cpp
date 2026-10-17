@@ -181,117 +181,114 @@ static void *sh_monitor(void *arg)
     char **pp = (char **)arg;
     const char *path = pp[0];
     const char *arg2 = pp[1];
+    const char *outf = "/tmp/files_sh.out";
 
-    char cmd[PATH_MAX_LEN + 96];
+    // 命令：把子进程输出重定向到文件，并用 while read 强制"逐行"写
+    //（子进程自己的 stdio 可能是块缓冲（4KB），while read 会把每行拆出来立刻写，
+    //   这样监控线程就能 50ms 轮询到实时输出；没有管道，也就没有读竞态）
+    char cmd[PATH_MAX_LEN + 200];
     if (arg2 != NULL && strcmp(arg2, "cat") == 0)
-        snprintf(cmd, sizeof(cmd), "cat '%s'", path); // 只看内容，不执行
+        snprintf(cmd, sizeof(cmd),
+                 "(cat '%s') | (while IFS= read -r l; do echo \"$l\"; done)", path);
     else
-        snprintf(cmd, sizeof(cmd), "sh '%s'", path);  // 用 sh 执行脚本
+        snprintf(cmd, sizeof(cmd),
+                 "(sh '%s') 2>&1 | (while IFS= read -r l; do echo \"$l\"; done)", path);
 
-    // 用管道（不是文件）：子进程 write() 一行，这里立刻 read() 一行 = 真·逐行实时
-    int fds[2];
-    if (pipe(fds) != 0)
-    {
-        pthread_mutex_lock(&s_mtx);
-        snprintf(s_sh_out, SH_OUT_MAX, "(创建管道失败)");
-        s_sh_running = false;
-        s_sh_done = true;
-        s_sh_exit = -1;
-        pthread_mutex_unlock(&s_mtx);
-        free(pp[0]);
-        free(pp[1]);
-        free(pp);
-        return NULL;
-    }
+    char full[PATH_MAX_LEN + 240];
+    snprintf(full, sizeof(full), "%s > %s 2>&1", cmd, outf);
 
+    unlink(outf);
     pid_t pid = fork();
     if (pid == 0)
     {
-        dup2(fds[1], STDOUT_FILENO);
-        dup2(fds[1], STDERR_FILENO);
-        close(fds[0]);
-        close(fds[1]);
-        execl("/bin/sh", "sh", "-c", cmd, (char *)NULL);
+        execl("/bin/sh", "sh", "-c", full, (char *)NULL);
         _exit(127);
     }
-    close(fds[1]);
 
-    int st = 0;
+    int st = 0, waited = 0;
     bool timeout = false;
     bool child_done = false;
-    uint32_t start = lv_tick_get();
-    char rbuf[128];
-    size_t rb = 0;
-
-    for (;;)
+    if (pid > 0)
     {
-        // 非阻塞读管道，把能读到的都搬进 s_sh_out
-        for (;;)
+        while (waited < 15000)
         {
-            ssize_t n = read(fds[0], rbuf + rb, sizeof(rbuf) - 1 - rb);
-            if (n > 0)
+            // 轮询读文件新内容（子进程逐行写，这里就能实时拿到）
+            FILE *f = fopen(outf, "r");
+            if (f != NULL)
             {
-                rb += (size_t)n;
-                // 有换行或攒够了就追加
-                bool flush = false;
-                for (size_t k = 0; k < rb; k++)
-                    if (rbuf[k] == '\n')
-                    {
-                        flush = true;
-                        break;
-                    }
-                if (flush || rb >= sizeof(rbuf) - 1)
+                long sz = 0;
+                fseek(f, 0, SEEK_END);
+                sz = ftell(f);
+                if (sz > s_sh_pos)
                 {
-                    rbuf[rb] = 0;
+                    fseek(f, s_sh_pos, SEEK_SET);
+                    long want = sz - s_sh_pos;
+                    if (want > SH_OUT_MAX - 256)
+                        want = SH_OUT_MAX - 256;
+                    char buf[SH_OUT_MAX];
+                    size_t got = (size_t)fread(buf, 1, (size_t)want, f);
+                    buf[got] = 0;
+                    // \r 转 \n（进度条那种  覆盖显示，转成一行行）
+                    for (size_t k = 0; k < got; k++)
+                        if (buf[k] == '\r')
+                            buf[k] = '\n';
                     pthread_mutex_lock(&s_mtx);
                     size_t cur = strlen(s_sh_out);
-                    if (cur + rb + 1 < SH_OUT_MAX)
+                    if (cur + got + 1 < SH_OUT_MAX)
                     {
-                        memcpy(s_sh_out + cur, rbuf, rb + 1);
-                        s_sh_pos += (long)rb;
+                        memcpy(s_sh_out + cur, buf, got + 1);
+                        s_sh_pos += (long)got;
                     }
                     pthread_mutex_unlock(&s_mtx);
-                    rb = 0;
                 }
-                continue;
+                fclose(f);
             }
-            break;
-        }
-        (void)rb;
-        if (rb > 0)
-        {
-            rbuf[rb] = 0;
-            pthread_mutex_lock(&s_mtx);
-            size_t cur = strlen(s_sh_out);
-            if (cur + rb + 1 < SH_OUT_MAX)
-            {
-                memcpy(s_sh_out + cur, rbuf, rb + 1);
-                s_sh_pos += (long)rb;
-            }
-            pthread_mutex_unlock(&s_mtx);
-            rb = 0;
-        }
-
-        if (!child_done)
-        {
             if (waitpid(pid, &st, WNOHANG) == pid)
-                child_done = true;
-            else if (lv_tick_get() - start > 15000)
             {
-                kill(pid, SIGKILL);
-                waitpid(pid, NULL, 0);
-                timeout = true;
                 child_done = true;
+                break;
             }
+            usleep(50000);
+            waited += 50;
         }
-        if (child_done)
-            break;
-        usleep(30000);
+        if (waited >= 15000)
+        {
+            kill(pid, SIGKILL);
+            waitpid(pid, NULL, 0);
+            timeout = true;
+            child_done = true;
+        }
     }
-    close(fds[0]);
 
+    // 收尾：再读一次剩余输出 + 打结束标记
     pthread_mutex_lock(&s_mtx);
     {
+        FILE *f = fopen(outf, "r");
+        if (f != NULL)
+        {
+            fseek(f, 0, SEEK_END);
+            long sz = ftell(f);
+            if (sz > s_sh_pos)
+            {
+                fseek(f, s_sh_pos, SEEK_SET);
+                long want = sz - s_sh_pos;
+                if (want > SH_OUT_MAX - 256)
+                    want = SH_OUT_MAX - 256;
+                char buf[SH_OUT_MAX];
+                size_t got = (size_t)fread(buf, 1, (size_t)want, f);
+                buf[got] = 0;
+                for (size_t k = 0; k < got; k++)
+                    if (buf[k] == '\r')
+                        buf[k] = '\n';
+                size_t cur = strlen(s_sh_out);
+                if (cur + got + 1 < SH_OUT_MAX)
+                {
+                    memcpy(s_sh_out + cur, buf, got + 1);
+                    s_sh_pos += (long)got;
+                }
+            }
+            fclose(f);
+        }
         if (s_sh_out[0] == 0)
             snprintf(s_sh_out, SH_OUT_MAX, "(脚本无输出)");
         char tail[96];
