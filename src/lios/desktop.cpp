@@ -53,7 +53,9 @@ static bool s_enc_prev = false; // 上一帧波轮是否按着（给插件发 �
 static int s_total = 0;      // 当前清单条目数（内置 + 插件）
 static int s_pages_n = 0;
 static int s_shown_page = 0; // 页码指示当前显示第几页（0 基）
+static lv_group_t *s_grp_desktop = NULL; // 桌面主菜单的组
 static int s_seen_rev = -1;  // 已看到的插件清单版本
+static lv_group_t *s_grp_page = NULL;    // 当前页面的组
 
 void lios_page_set_hooks(const lios_page_hooks_t *hooks)
 {
@@ -61,6 +63,41 @@ void lios_page_set_hooks(const lios_page_hooks_t *hooks)
 }
 
 // 打开第 idx 个应用的页面（UI 线程、已持锁）
+static void page_group_enter(void)
+{
+    if (s_grp_desktop == NULL)
+        s_grp_desktop = lv_group_get_default();
+    if (s_grp_page != NULL)
+        lv_group_del(s_grp_page);
+    s_grp_page = lv_group_create();
+    lv_group_set_wrap(s_grp_page, true);
+    lv_group_set_default(s_grp_page);
+    lv_indev_t *indev = lv_indev_get_next(NULL);
+    if (indev != NULL)
+        lv_indev_set_group(indev, s_grp_page);
+}
+
+static void page_group_exit(void)
+{
+    lv_indev_t *indev = lv_indev_get_next(NULL);
+    if (indev != NULL && s_grp_desktop != NULL)
+        lv_indev_set_group(indev, s_grp_desktop);
+    if (s_grp_desktop != NULL)
+        lv_group_set_default(s_grp_desktop);
+    if (s_grp_page != NULL)
+    {
+        lv_group_del(s_grp_page);
+        s_grp_page = NULL;
+    }
+    for (int i = 0; i < 256; i++)
+        if (s_tiles[i] != NULL && lv_obj_is_valid(s_tiles[i]))
+        {
+            if (s_grp_desktop != NULL)
+                lv_group_focus_obj(s_tiles[i]);
+            break;
+        }
+}
+
 static void desktop_open(int idx);
 static void build_grid(void);
 
@@ -89,6 +126,8 @@ static const char *desktop_hint(void)
 
 // ---------------------------------------------------------------- 进入 / 退出方块
 
+// 焦点组隔离：桌面（主菜单）一个组，每个页面一个独立组。
+// 否则页面滚轮焦点会串到背后桌面的方块（滚到底点一下直接进相机）。
 static void tile_click_cb(lv_event_t *e)
 {
     lv_obj_t *t = lv_event_get_target(e);
@@ -165,6 +204,7 @@ static void desktop_open(int idx)
         s_page_hooks = NULL;
         s_page = make_page();
         s_page_idx = idx;
+        page_group_enter();
         lv_indev_enable(NULL, false); // 插件自己收滚轮/按键
         s_page_wheel_focus = false;
         s_enc_prev = lios_enc_pressed();
@@ -188,6 +228,7 @@ static void desktop_open(int idx)
     s_page_wheel_focus = app->wheel_focus;
     s_page = make_page();
     s_page_idx = idx;
+    page_group_enter();
 
     // 列表类页面（wheel_focus=true）自己用滚轮走焦点；别的页面关掉编码器输入，
     // 免得滚轮/确认去动背后桌面上的方块
@@ -234,6 +275,7 @@ static void desktop_close_page(void)
     s_page_hooks = NULL;
     s_page_wheel_focus = false;
     s_page_idx = -1;
+    page_group_exit();
     lv_indev_enable(NULL, true); // 恢复滚轮走焦点
     set_hint(desktop_hint());
 }
