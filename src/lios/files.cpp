@@ -19,6 +19,8 @@
 #include <dirent.h>
 #include <errno.h>
 #include <pthread.h>
+#include <signal.h>
+#include <sys/wait.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -49,7 +51,8 @@ enum
     REQ_NONE = 0,
     REQ_SCAN,
     REQ_DELETE,
-    REQ_RENAME
+    REQ_RENAME,
+    REQ_RUNSH // 执行 .sh 脚本
 };
 
 static pthread_mutex_t s_mtx = PTHREAD_MUTEX_INITIALIZER;
@@ -63,6 +66,11 @@ static char s_res_dir[PATH_MAX_LEN];
 static bool s_res_ready = false;
 static char s_status[160];            // 状态/错误（worker 写，UI 读）
 static bool s_status_dirty = false;
+// 执行 .sh 脚本的输出（worker 写，UI 读）
+#define SH_OUT_MAX 4000
+static char s_sh_out[SH_OUT_MAX];
+static bool s_sh_ready = false;
+static char s_sh_name[NAME_MAX_LEN];
 
 // ---------------------------------------------------------------- UI 状态
 static lv_obj_t *s_page = NULL;
@@ -159,6 +167,60 @@ static void worker_scan(const char *path)
     pthread_mutex_unlock(&s_mtx);
 }
 
+// 执行 .sh 脚本：输出重定向到 /tmp（不写 SD 卡），带 15 秒超时
+static void worker_run_sh(const char *path, const char *arg)
+{
+    const char *outf = "/tmp/files_sh.out";
+    unlink(outf);
+    char cmd[PATH_MAX_LEN + 96];
+    if (arg != NULL && strcmp(arg, "cat") == 0)
+        snprintf(cmd, sizeof(cmd), "cat '%s' > %s 2>&1", path, outf); // 只看内容，不执行
+    else
+        snprintf(cmd, sizeof(cmd), "(sh '%s') > %s 2>&1", path, outf); // 用 sh 执行脚本
+
+    pid_t pid = fork();
+    if (pid == 0)
+    {
+        execl("/bin/sh", "sh", "-c", cmd, (char *)NULL);
+        _exit(127);
+    }
+    int st = 0, waited = 0;
+    if (pid > 0)
+    {
+        while (waited < 15000)
+        {
+            if (waitpid(pid, &st, WNOHANG) == pid)
+                break;
+            usleep(100000);
+            waited += 100;
+        }
+        if (waited >= 15000)
+        {
+            kill(pid, SIGKILL);
+            waitpid(pid, NULL, 0);
+        }
+    }
+
+    pthread_mutex_lock(&s_mtx);
+    s_sh_out[0] = 0;
+    FILE *f = fopen(outf, "r");
+    if (f != NULL)
+    {
+        size_t got = fread(s_sh_out, 1, SH_OUT_MAX - 1, f);
+        s_sh_out[got] = 0;
+        fclose(f);
+    }
+    if (s_sh_out[0] == 0)
+        snprintf(s_sh_out, SH_OUT_MAX, "(脚本无输出)");
+    if (waited >= 15000)
+        strncat(s_sh_out, "\n[超时 15 秒，已强制结束]", SH_OUT_MAX - strlen(s_sh_out) - 1);
+    snprintf(s_status, sizeof(s_status), "脚本执行完成");
+    s_status_dirty = true;
+    s_sh_ready = true;
+    s_busy = false;
+    pthread_mutex_unlock(&s_mtx);
+}
+
 static void worker_op(int req, const char *path, const char *arg)
 {
     char status[160] = "";
@@ -168,6 +230,11 @@ static void worker_op(int req, const char *path, const char *arg)
             snprintf(status, sizeof(status), "已删除");
         else
             snprintf(status, sizeof(status), "删除失败：%s", strerror(errno));
+    }
+    else if (req == REQ_RUNSH)
+    {
+        worker_run_sh(path, arg); // 自己管理 s_busy/s_status，直接返回
+        return;
     }
     else if (req == REQ_RENAME)
     {
@@ -206,7 +273,7 @@ static void *worker_main(void *)
 
         if (req == REQ_SCAN)
             worker_scan(path);
-        else if (req == REQ_DELETE || req == REQ_RENAME)
+        else if (req == REQ_DELETE || req == REQ_RENAME || req == REQ_RUNSH)
             worker_op(req, path, arg);
         else
             usleep(30 * 1000);
@@ -359,6 +426,59 @@ static void card_show(const char *text, const char *const *btns, int n, void (*c
         lv_group_focus_obj(first);
 }
 
+// 展示脚本执行结果（可滚动）
+static void show_sh_result(void)
+{
+    pthread_mutex_lock(&s_mtx);
+    char out[SH_OUT_MAX];
+    snprintf(out, sizeof(out), "%s", s_sh_out);
+    snprintf(s_sh_name, sizeof(s_sh_name), "%s", s_sh_name); // 保持
+    s_sh_ready = false;
+    pthread_mutex_unlock(&s_mtx);
+
+    card_close();
+    s_card = lv_obj_create(lv_scr_act());
+    lv_obj_set_size(s_card, 312, 226);
+    lv_obj_align(s_card, LV_ALIGN_TOP_MID, 0, 4);
+    lv_obj_set_style_radius(s_card, 6, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_color(s_card, lv_color_hex(0x0B1116), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_opa(s_card, LV_OPA_COVER, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_border_width(s_card, 2, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_border_color(s_card, lv_color_hex(0x69C0FF), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_pad_all(s_card, 2, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_clear_flag(s_card, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_move_foreground(s_card);
+
+    lv_obj_t *title = lv_label_create(s_card);
+    lv_obj_set_style_text_font(title, &ui_font_cn12, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_color(title, lv_color_hex(0x9AD7FF), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_label_set_text(title, "脚本执行结果（菜单键关闭）");
+    lv_obj_set_pos(title, 2, 2);
+
+    lv_obj_t *box = lv_obj_create(s_card);
+    lv_obj_set_size(box, 300, 194);
+    lv_obj_set_pos(box, 2, 20);
+    lv_obj_add_flag(box, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(box, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(box, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_style_bg_color(box, lv_color_hex(0x05080B), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_border_width(box, 1, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_border_color(box, lv_color_hex(0x1E2A36), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_pad_all(box, 3, LV_PART_MAIN | LV_STATE_DEFAULT);
+
+    lv_obj_t *lab = lv_label_create(box);
+    lv_obj_set_width(lab, 288);
+    lv_label_set_long_mode(lab, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_font(lab, &ui_font_cn12, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_color(lab, lv_color_hex(0xD8E2EA), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_label_set_text(lab, out);
+    s_card_cb = NULL;
+    for (int i = 0; i < MAX_ROWS; i++)
+        if (s_rows[i] != NULL && lv_obj_is_valid(s_rows[i]))
+            lv_obj_clear_flag(s_rows[i], LV_OBJ_FLAG_CLICK_FOCUSABLE);
+    lv_group_focus_obj(box);
+}
+
 // ---------------------------------------------------------------- 操作
 static void do_delete(void)
 {
@@ -383,6 +503,25 @@ static void confirm_delete_cb(int idx)
 {
     if (idx == 0)
         do_delete();
+}
+
+// .sh 文件的操作：0=执行 1=看内容 2=取消
+static void sh_action_cb(int idx)
+{
+    char full[PATH_MAX_LEN + NAME_MAX_LEN + 2];
+    snprintf(full, sizeof(full), "%s/%s", s_cwd, s_names[s_sel]);
+    if (idx == 0)
+    {
+        snprintf(s_sh_name, sizeof(s_sh_name), "%s", s_names[s_sel]);
+        request(REQ_RUNSH, full, NULL);
+        set_hint("正在执行脚本…（最长 15 秒）");
+    }
+    else if (idx == 1)
+    {
+        // 复用文本查看器：这里简单读文件内容并弹卡片
+        request(REQ_RUNSH, full, "cat"); // 用 sh 的 cat 读出来（不执行脚本本体）
+        set_hint("正在读取脚本内容…");
+    }
 }
 
 static void card_action_cb(int idx)
@@ -697,6 +836,14 @@ static void page_tick(void)
 
     if (have)
         ui_build_rows();
+
+    // 脚本执行完成 → 弹结果卡片
+    bool sh_ready = false;
+    pthread_mutex_lock(&s_mtx);
+    sh_ready = s_sh_ready;
+    pthread_mutex_unlock(&s_mtx);
+    if (sh_ready)
+        show_sh_result();
 
     if (dirty)
     {
