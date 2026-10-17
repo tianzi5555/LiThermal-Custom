@@ -4,6 +4,7 @@
 // 帧来源：LVGL 的绘制缓冲 s_fb_buf（ARGB8888，320x240）
 // 录屏：libavcodec MJPEG 编码 + libavformat AVI 封装，10fps
 
+#include <lvgl.h>
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libavutil/imgutils.h>
