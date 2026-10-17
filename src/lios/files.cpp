@@ -432,7 +432,6 @@ static void show_sh_result(void)
     pthread_mutex_lock(&s_mtx);
     char out[SH_OUT_MAX];
     snprintf(out, sizeof(out), "%s", s_sh_out);
-    snprintf(s_sh_name, sizeof(s_sh_name), "%s", s_sh_name); // 保持
     s_sh_ready = false;
     pthread_mutex_unlock(&s_mtx);
 
