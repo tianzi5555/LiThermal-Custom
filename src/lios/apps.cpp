@@ -49,9 +49,9 @@ const lios_app_def_t LIOS_APPS[] = {
     // 文件管理器：真页面（列表类，需要滚轮走焦点）
     {"files", "文件管理器", "文", page_files_create, true},
     // 下面三个还是占位页（第 3/4 批做成真页面）
-    {"settings", "设置", "设", NULL, false},
-    {"perm", "权限管理", "权", NULL, false},
-    {"tasks", "后台", "后", NULL, false},
+    {"settings", "设置", "设", page_settings_create, true},
+    {"perm", "权限管理", "权", page_perm_create, true},
+    {"tasks", "后台", "后", page_tasks_create, true},
 };
 
 const int LIOS_APP_COUNT = (int)(sizeof(LIOS_APPS) / sizeof(LIOS_APPS[0]));

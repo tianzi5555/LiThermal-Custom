@@ -116,6 +116,9 @@ void lios_desktop_set_wheel_focus(bool on);
 
 // 文件管理器页面（src/lios/files.cpp）
 void page_files_create(lv_obj_t *parent);
+void page_perm_create(lv_obj_t *parent);     // 权限管理
+void page_tasks_create(lv_obj_t *parent);    // 后台 / 任务管理
+void page_settings_create(lv_obj_t *parent); // 设置（仿安卓分组列表）
 
 void lios_desktop_create(void);   // UI 线程首次调用（已持锁）
 void lios_desktop_tick(void);     // 每帧调用（已持锁）：返回键 + 电源长按
