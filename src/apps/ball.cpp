@@ -1,1035 +1,734 @@
 // ============================================================================
-//  弹球游戏（打砖块）—— LiOS 可 dlopen 插件应用
-//  目标平台：全志 T113 相机 / LVGL 8.4 / 320x240 横屏 / musl / 117MB RAM
+//  弹球游戏 —— 忠实移植自用户自己的 ESP32-S3 项目 ESP-S3/BallGame.h（608 行，已逐行读完）
 //
-//  移植来源：ESP32-S3 版 BallGame.h（TFT_eSPI + U8g2_for_TFT_eSPI），逻辑一一对应：
-//      * 挡板平滑跟随：目标位置 + 加速度/阻尼滤波（paddleTarget / paddlePos / paddleVelocity）
-//      * 球碰左右墙 + 顶部反弹、挡板把球弹回、接球位置决定水平反弹角度（hitPos 越大越斜）
-//      * 接一次球 +1 分、每次接球略微提速、球落底判负、暂停/继续、结束页
+//  【原版对照表】（行号 = BallGame.h）
+//   L14-23   240x240；挡板 40x8；PADDLE_Y = H-8-2；球 8px；背景 (12,14,24)
+//            -> 本移植 320x240 横屏；挡板 52（40×320/240≈53）；球仍 8px；PADDLE_Y=230；同背景色
+//   L26-28   难度 4 档 {"简单","中等","困难","超难"} = {0.8,1.0,1.5,2.2}，默认第 2 档
+//   L97-121  resetGame：球回中心；baseSpeed=2.0×系数（本移植再乘屏宽比 1.333 保持手感）；
+//            X 随机方向、Y=-baseSpeed；分数清零
+//   L124-135 updatePaddle：diff=target-pos；accel=diff*0.3；vel=vel*0.7+accel；|vel|>10 夹紧；
+//            pos+=vel；夹边界；paddleX=(int)(pos+0.5)                  —— 逐行照抄
+//   L139-147 左右键把 paddleTargetX ∓5（本移植：滚轮每格 ∓12，因为滚轮是离散的）
+//   L151-183 确认键短按=暂停/继续；长按≥1500ms=退出
+//   L202-255 updateGame：位移→左右上墙反弹→接球（仅 canScore 时）hitPos=(球心-挡板心)；
+//            speedX=constrain(hitPos/5,-6,6)；speedY=-|speedY|；score++；200ms 后 canScore 恢复；
+//            |speedX|<7 时 += ±0.12×难度系数；ballY>=H → GAME_OVER（**没有生命，掉一次就结束**）
+//   L258-328 HUD 左"得分 N"中"时间 m:ss.d"右"帧率 N"；暂停=全屏变暗+"暂停中"+"难度: x"
+//   L331-449 结束动画：3 圈扩散（1.5s，缓动 1-(1-p)^3）→"游戏结束"+三行统计（得分/时间/难度）
+//            +"确认:重玩 任意键:退出"；确认=重玩；无操作 1.5s 自动退出
+//   L452-603 难度菜单：标题"弹球游戏/Ball Game"、4 张卡片（含描述）、高亮条缓动滑动
+//            （hlY += (target-hlY)*0.22）、底部按键提示
 //
-//  环境差异导致的改动（逐条记录，方便回看原版）：
-//      1) 原版 240x240 竖屏 + sprite 阻塞主循环  ->  320x240 横屏 + lv_timer 固定步长驱动。
-//         物理按 16ms 一个子步（BG_STEP_MS）推进，和原版「一帧」完全等价；
-//         回调里绝不 sleep、绝不 while 死等。
-//      2) 引脚 digitalRead 长按  ->  lios_app_key() 事件（滚轮左右 + 确认键）。
-//      3) 原版难度菜单（简单/中等/困难/超难）：滚轮已经用来移动挡板，而且这四个词在
-//         ui_font_cn16 里几乎没有字形  ->  固定「中等」基准速度（原版 diffFactors[1] = 1.0），
-//         改用关卡 Lv 递增速度（1.0 -> 2.2，正好覆盖原版 0.8~2.2 的难度区间）。
-//      4) 原版 canScore + 200ms 冷却防重复计分  ->  改成「球必须由上往下撞挡板，撞到后
-//         吸附到挡板上沿」，同样不会重复计分，而且不依赖 millis()。
-//      5) 原版没有砖块（纯对打）  ->  加了一面 4x8 砖块墙，让「生命 / Lv / 胜负」有实际意义；
-//         打光整面墙 = 过关（Lv+1、砖块重铺、球速上限提高）。
-//      6) 缺字保护：ui_font_cn16 只带 0x20-0x7f + 192 个常用汉字，实测没有
-//         「得 / 分 / 暂 / 停 / 弹 / 球 / 游 / 戏 / 滚 / 轮」等字，直接写会渲染成占位方块。
-//         所以启动时探一次字形（bg_t），缺字就退化成字体里有的同义说法：
-//             「得分」->「计数」  「暂停」->「不动」  「游戏结束」->「结束」  「弹球游戏」->「PONG」
-//         以后把字体换成更全的版本，会自动用回原词，不用改这里。
+//  本平台按键（桌面转发规则见 lios/desktop.cpp 的 plugin_forward）：
+//    滚轮       -> LIOS_KEY_LEFT / LIOS_KEY_RIGHT（每格一对 按下+抬起）
+//    波轮按下   -> LIOS_KEY_ENTER（按下/抬起，长按要自己按时间判断）
+//    录像键     -> LIOS_KEY_REC
+//    菜单键     -> LIOS_KEY_BACK（**桌面会同时关闭本页 = 退出应用**）
+//  因此：菜单键 = 退出应用；录像键 = 回到难度菜单（原版"任意键退出"的位置）
 //
-//  屏幕布局（320x240 横屏）：
-//      y  0 ~  21   顶部状态行：得分 xxx  生命 x  Lv.x
-//      y 22 ~ 239   游戏区（纯黑）：4 行 x 8 列砖块 + 球（带拖尾）+ 挡板
-//
-//  按键映射（桌面通过 lios_app_key 转发）：
-//      LIOS_KEY_LEFT  / LIOS_KEY_RIGHT  滚轮左右转：挡板左右移动（每格 12px，带平滑加速）
-//      LIOS_KEY_ENTER                   开始 / 暂停 / 继续 / 重开（等待发球时 = 立刻发球）
-//      LIOS_KEY_POWER                   暂停 / 继续（与确认键等价的备用键）
-//      LIOS_KEY_UP    / LIOS_KEY_DOWN   兜底：个别固件把滚轮上报成上下，也当左右用
-//      LIOS_KEY_BACK                    不处理，由桌面统一退出
-//
-//  内存：全部游戏数据在 lios_app_create() 里 calloc 一小块（约 400 字节），
-//        lios_app_destroy() 里 free；LVGL 对象由桌面容器统一删除，这里只删自己的定时器。
-//
-//  线程：lv_timer 回调 = LVGL 线程。lios_app_key() 可能来自 HAL 线程，
-//        所以它只做两件不碰控件的事：改挡板目标位置（几个 float）、置一个确认标志；
-//        所有会动 lv_obj 的动作都在 bg_timer_cb 里执行。
+//  纪律：桌面转发的按键与 lv_timer 回调都在 UI 线程 → 只用普通变量，不加锁、不做阻塞 I/O
 // ============================================================================
 
 #include "lios_app.h"
-#include "my_main.h" // ui_font_cn16 等字体声明
+#include "my_main.h"
 
+#include <math.h>
 #include <stdio.h>
-#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-#include <math.h>
-#include <time.h>
 
-// ---------------------------------------------------------------- 尺寸常量
-#define BG_SCREEN_W 320
-#define BG_SCREEN_H 240
-#define BG_HUD_H 22                              // 顶部状态行高度
-#define BG_FIELD_Y BG_HUD_H                      // 游戏区上沿
-#define BG_FIELD_H (BG_SCREEN_H - BG_HUD_H)      // 游戏区高度 218
+// ---------------------------------------------------------------- 尺寸（对应原版 L14-23）
+#define G_W 320
+#define G_H 240
+#define PADDLE_W 52
+#define PADDLE_H 8
+#define PADDLE_Y (G_H - PADDLE_H - 2)
+#define BALL 8
+#define SPEED_SCALE 1.333f
+#define FRAME_MS 16 // 原版 TARGET_FRAME_TIME = 16
 
-#define BG_BALL 8                                // 球（正方形对象 + 整圆角）
-#define BG_PADDLE_W 56                           // 挡板（原版 40，横屏放宽一点更好接球）
-#define BG_PADDLE_H 8
-#define BG_PADDLE_Y (BG_SCREEN_H - BG_PADDLE_H - 4)
+// ---------------------------------------------------------------- 难度（原版 L26-28 / L468-472）
+static const char *kDiffNames[4] = {"简单", "中等", "困难", "超难"};
+static const char *kDiffDescs[4] = {"入门速度 轻松上手", "标准速度 经典体验",
+                                    "高速挑战 反应考验", "极限速度 终极试炼"};
+static const float kDiffFactors[4] = {0.8f, 1.0f, 1.5f, 2.2f};
+static lv_color_t g_diffColor[4];
 
-#define BG_BRICK_ROWS 4                          // 砖块墙：4 行 x 8 列 = 32 块
-#define BG_BRICK_COLS 8
-#define BG_BRICK_W 34
-#define BG_BRICK_H 13
-#define BG_BRICK_X0 10                           // 10 + 7*38 + 34 = 310，左右各留 10px
-#define BG_BRICK_Y0 32                           // 状态行下方 10px
-#define BG_BRICK_PITCH_X 38
-#define BG_BRICK_PITCH_Y 16
-
-// ---------------------------------------------------------------- 手感 / 时序常量
-#define BG_STEP_MS 16                            // 物理固定步长 = 原版一帧
-#define BG_TIMER_MS 30                           // lv_timer 周期（约 33fps，够顺滑又不费 CPU）
-#define BG_MAX_STEPS 4                           // 单次回调最多补几步，防止卡顿雪崩
-#define BG_KEY_STEP 12                           // 滚轮每转一格，挡板目标位移
-#define BG_LIVES 3                               // 初始生命
-#define BG_SERVE_MS 700                          // 丢命/过关后等待自动发球
-#define BG_FLASH_MS 900                          // 过关时状态行提示时长
-
-#define BG_BASE_SPEED 2.0f                       // 原版中等难度：2.0 像素/帧（16ms）
-#define BG_SPEED_MAX 2.2f                        // 原版超难难度系数上限
-#define BG_BALL_SPEED_MAX 4.0f                   // 球速硬上限（防止高关卡失控）
-#define BG_VX_MAX 3.2f                           // 水平速度上限（保证还有足够的垂直分量）
-
-// ---------------------------------------------------------------- 配色（黑色背景）
-#define BG_C_FIELD lv_color_hex(0x000000)        // 游戏区底色：纯黑
-#define BG_C_HUD lv_color_hex(0x0A0D14)          // 状态行底色
-#define BG_C_LINE lv_color_hex(0x1E2635)         // 状态行下沿分隔线
-#define BG_C_TEXT lv_color_hex(0xE8EEF4)         // 状态行正文
-#define BG_C_GOLD lv_color_hex(0xFFD54F)         // 过关提示色
-#define BG_C_DIM lv_color_hex(0x9AA7B4)          // 次要文字
-#define BG_C_PADDLE lv_color_hex(0x1EB4DC)       // 挡板主体（原版 30,180,220）
-#define BG_C_PADDLE_HI lv_color_hex(0xB4F0FF)    // 挡板高光（原版 180,240,255）
-#define BG_C_BALL lv_color_hex(0xFFFFFF)         // 球：纯白
-#define BG_C_TRAIL0 lv_color_hex(0x2C5570)       // 拖尾（近端）
-#define BG_C_TRAIL1 lv_color_hex(0x16334A)       // 拖尾（远端）
-#define BG_C_OVERLAY lv_color_hex(0x000000)      // 遮罩底色
-
-// 砖块墙每行的颜色（自上而下）
-static const uint32_t kBgBrickColors[BG_BRICK_ROWS] = {
-    0xFF4D4F, // 红
-    0xFFA940, // 橙
-    0x36CFC9, // 青
-    0x8A63F0  // 紫
-};
-
-// ---------------------------------------------------------------- 游戏状态
+// ---------------------------------------------------------------- 状态机
 enum
 {
-    BG_ST_READY = 0, // 准备开始（等确认键）
-    BG_ST_PLAY,      // 球在飞
-    BG_ST_SERVE,     // 球贴在挡板上，倒计时后自动发球（丢命重生 / 过关后）
-    BG_ST_PAUSE,     // 暂停
-    BG_ST_OVER       // 游戏结束
+    ST_MENU = 0,
+    ST_PLAY,
+    ST_PAUSE,
+    ST_OVER_ANIM,
+    ST_OVER
 };
 
-// 可见性缓存（只在状态真的变化时才 add/clear HIDDEN，避免每帧白白重绘）
-#define BG_VIS_UNKNOWN 0
-#define BG_VIS_ON 1
-#define BG_VIS_OFF 2
+// ---- 对象
+static lv_obj_t *g_root = NULL;
+static lv_obj_t *g_hud_score = NULL, *g_hud_time = NULL, *g_hud_fps = NULL;
+static lv_obj_t *g_paddle = NULL, *g_paddle_hl = NULL;
+static lv_obj_t *g_ball = NULL, *g_ball_dot = NULL, *g_trail[2] = {NULL, NULL};
+static lv_obj_t *g_menu[4] = {0}, *g_menu_txt[4] = {0}, *g_menu_desc[4] = {0};
+static lv_obj_t *g_menu_title = NULL, *g_menu_sub = NULL, *g_menu_hint = NULL, *g_hl = NULL;
+static lv_obj_t *g_pause_box = NULL, *g_pause_t1 = NULL, *g_pause_t2 = NULL;
+static lv_obj_t *g_over_title = NULL, *g_over_box[3] = {0}, *g_over_lbl[3] = {0},
+                *g_over_val[3] = {0}, *g_over_hint = NULL;
+static lv_obj_t *g_circle[3] = {NULL, NULL, NULL};
+static lv_timer_t *g_timer = NULL;
 
-// 全局只有一份游戏数据：按任务要求 malloc 一小块，destroy 时 free
-typedef struct
+// ---- 游戏变量（原版 L31-79）
+static int g_state = ST_MENU;
+static int g_diff = 1;
+static int g_paddle_x = (G_W - PADDLE_W) / 2;
+static float g_paddle_pos = (G_W - PADDLE_W) / 2.0f;
+static float g_paddle_target = (G_W - PADDLE_W) / 2.0f;
+static float g_paddle_vel = 0.0f;
+static float g_ball_x = G_W / 2.0f, g_ball_y = G_H / 2.0f;
+static float g_ball_sx = 2.0f, g_ball_sy = -2.0f;
+static int g_score = 0;
+static bool g_can_score = true;
+static uint32_t g_last_score_ms = 0;
+static uint32_t g_start_ms = 0;
+static float g_game_time = 0.0f;
+static uint32_t g_over_ms = 0, g_anim_ms = 0;
+static float g_anim_cx = 0, g_anim_cy = 0;
+static uint32_t g_frames = 0, g_fps_t0 = 0;
+static float g_fps = 0.0f;
+static float g_hl_y = 0.0f;
+static bool g_pause_blink = true;
+static uint32_t g_blink_ms = 0;
+
+// ---- 输入（桌面转发，UI 线程）
+static int g_left_cnt = 0, g_right_cnt = 0, g_rec_cnt = 0;
+static bool g_enter_down = false;
+static uint32_t g_enter_ms = 0;
+static bool g_enter_long = false;
+static int g_enter_clicks = 0;
+
+static void menu_show(bool on);
+static void play_show(bool on);
+static void over_show(bool on);
+static void pause_show(bool on);
+static void start_game(void);
+static void go_menu(void);
+
+// ---------------------------------------------------------------- 小工具
+static lv_obj_t *mk_rect(lv_obj_t *p, int x, int y, int w, int h, lv_color_t c, int r)
 {
-    int state;                   // BG_ST_*
-    int score;                   // 得分（砖块 +10、接球 +1、过关 +50）
-    int lives;                   // 剩余生命
-    int level;                   // 关卡（打光一面墙 +1）
-    float speed_mul;             // 关卡速度系数（替代原版 diffFactors）
-    float ball_speed;            // 当前球速（像素/16ms 帧），随接球次数缓慢增加
-
-    float paddle_pos;            // 挡板真实位置（原版 paddlePosX）
-    float paddle_target;         // 挡板目标位置（原版 paddleTargetX）
-    float paddle_vel;            // 挡板速度（原版 paddleVelocity）
-    int paddle_x;                // 挡板整数位置（原版 paddleX）
-
-    float ball_x;                // 球左上角（原版 ballX / ballY）
-    float ball_y;
-    float ball_vx;               // 原版 ballSpeedX / ballSpeedY
-    float ball_vy;
-
-    uint8_t bricks[BG_BRICK_ROWS][BG_BRICK_COLS];        // 1 = 还在，0 = 已打掉
-    lv_obj_t *brick_obj[BG_BRICK_ROWS][BG_BRICK_COLS];   // 每块砖的 lv_obj
-    int bricks_left;                                     // 还剩几块砖
-
-    int serve_ms;                // 发球倒计时
-    int level_flash_ms;          // 过关提示倒计时
-    uint32_t acc_ms;             // 固定步长累加器
-    uint32_t last_tick;          // 上一次回调的 lv_tick
-    uint32_t total_ms;           // 本局累计时长
-    uint32_t rng;                // 简易 xorshift（不用 rand()）
-
-    char hud_shown[48];          // 状态行当前文本（相同就不重设，省一次重绘）
-    uint8_t hud_flash_on;        // 状态行是否处于过关提示态
-    uint8_t vis_paddle;          // 可见性缓存（每帧只做比较，不重复 add/clear）
-    uint8_t vis_ball;
-    uint8_t vis_trail[2];        // 两段拖尾各自一份缓存
-} bg_game_t;
-
-static bg_game_t *g = NULL;
-
-static lv_obj_t *g_root = NULL;    // 本应用最外层对象
-static lv_obj_t *g_lb_hud = NULL;  // 状态行文本
-static lv_obj_t *g_paddle = NULL;  // 挡板
-static lv_obj_t *g_ball = NULL;    // 球
-static lv_obj_t *g_trail[2] = {NULL, NULL}; // 拖尾两段
-
-static lv_obj_t *g_overlay = NULL; // 准备 / 暂停 / 结束遮罩
-static lv_obj_t *g_ov_title = NULL;
-static lv_obj_t *g_ov_sub = NULL;
-static lv_obj_t *g_ov_hint = NULL;
-
-static lv_timer_t *g_timer = NULL; // 游戏心跳
-
-// 待处理的「确认键」命令：lios_app_key() 有可能来自 HAL 线程，
-// 而所有会动 lv_obj 的动作必须留在 LVGL 线程（lv_timer）里做，
-// 所以这里只置一个标志，真正的状态切换在 bg_timer_cb 里执行。
-static volatile int g_pending_cmd = 0;
-
-// 字体里存在的说法（下面是兜底值，create() 里会用字形探测的结果覆盖）
-static const char *g_word_title = "PONG";
-static const char *g_word_score = "计数";
-static const char *g_word_life = "生命";
-static const char *g_word_pause = "不动";
-static const char *g_word_over = "结束";
-
-// ---------------------------------------------------------------- 前向声明
-static void bg_hud_update(void);
-static void bg_show_overlay(const char *title, const char *sub, const char *hint);
-static void bg_hide_overlay(void);
-static void bg_new_game(void);
-static void bg_launch(void);
-
-// ============================================================================
-//  小工具
-// ============================================================================
-// 纯色方块：无边框 / 无圆角 / 不滚动 / 无内边距（之后按需单独加圆角和边框）
-static void bg_plain(lv_obj_t *o)
-{
+    lv_obj_t *o = lv_obj_create(p);
+    lv_obj_set_size(o, w, h);
+    lv_obj_set_pos(o, x, y);
     lv_obj_clear_flag(o, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_style_bg_opa(o, LV_OPA_TRANSP, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_radius(o, r, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_border_width(o, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_radius(o, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_pad_all(o, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_shadow_width(o, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
-}
-
-static void bg_set_bg(lv_obj_t *o, lv_color_t c)
-{
     lv_obj_set_style_bg_color(o, c, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_bg_opa(o, LV_OPA_COVER, LV_PART_MAIN | LV_STATE_DEFAULT);
+    return o;
 }
 
-// 只在可见性真的变化时才动 HIDDEN 标志（clear_flag 会无条件重绘一次）
-static void bg_set_visible(lv_obj_t *o, uint8_t *cache, bool visible)
+static lv_obj_t *mk_circle(lv_obj_t *p, int dia, lv_color_t c)
 {
-    if (!o)
+    lv_obj_t *o = mk_rect(p, 0, 0, dia, dia, c, LV_RADIUS_CIRCLE);
+    return o;
+}
+
+static lv_obj_t *mk_label(lv_obj_t *p, const char *t, const lv_font_t *f, lv_color_t c)
+{
+    lv_obj_t *l = lv_label_create(p);
+    lv_label_set_text(l, t);
+    lv_obj_set_style_text_font(l, f, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_color(l, c, LV_PART_MAIN | LV_STATE_DEFAULT);
+    return l;
+}
+
+// ---------------------------------------------------------------- 建界面
+static void build_all(lv_obj_t *parent)
+{
+    g_root = parent;
+    lv_obj_set_style_bg_color(g_root, lv_color_hex(0x0C0E18), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_opa(g_root, LV_OPA_COVER, LV_PART_MAIN | LV_STATE_DEFAULT);
+
+    g_diffColor[0] = lv_color_hex(0x288C50);
+    g_diffColor[1] = lv_color_hex(0x2864B4);
+    g_diffColor[2] = lv_color_hex(0xC87828);
+    g_diffColor[3] = lv_color_hex(0xC83232);
+
+    // HUD（原版 L283-297）
+    g_hud_score = mk_label(g_root, "得分 0", &ui_font_cn12, lv_color_hex(0x64D28C));
+    lv_obj_set_pos(g_hud_score, 6, 4);
+    g_hud_time = mk_label(g_root, "0:00.0", &ui_font_cn12, lv_color_hex(0xB4B9C3));
+    lv_obj_align(g_hud_time, LV_ALIGN_TOP_MID, 0, 4);
+    g_hud_fps = mk_label(g_root, "帧率 --", &ui_font_cn12, lv_color_hex(0x787D8C));
+    lv_obj_align(g_hud_fps, LV_ALIGN_TOP_RIGHT, -6, 4);
+
+    // 挡板（原版 L263-265）
+    g_paddle = mk_rect(g_root, g_paddle_x, PADDLE_Y, PADDLE_W, PADDLE_H, lv_color_hex(0x1EB4DC), 4);
+    g_paddle_hl = mk_rect(g_root, g_paddle_x + 4, PADDLE_Y + 2, PADDLE_W - 8, 2,
+                          lv_color_hex(0xB4F0FF), 3);
+
+    // 球 + 拖尾 + 高光（原版 L268-276）
+    g_trail[0] = mk_circle(g_root, BALL - 2, lv_color_hex(0x28503C));
+    g_trail[1] = mk_circle(g_root, BALL - 4, lv_color_hex(0x14283C));
+    g_ball = mk_circle(g_root, BALL, lv_color_white());
+    g_ball_dot = mk_circle(g_root, 2, lv_color_hex(0xC8E6FF));
+
+    // 暂停遮罩（原版 L300-325）
+    g_pause_box = mk_rect(g_root, 0, 0, G_W, G_H, lv_color_hex(0x080810), 0);
+    lv_obj_set_style_bg_opa(g_pause_box, LV_OPA_90, LV_PART_MAIN | LV_STATE_DEFAULT);
+    g_pause_t1 = mk_label(g_root, "暂停中", &ui_font_cn16, lv_color_hex(0xFFC83C));
+    lv_obj_align(g_pause_t1, LV_ALIGN_CENTER, 0, -18);
+    g_pause_t2 = mk_label(g_root, "难度: 中等", &ui_font_cn12, lv_color_hex(0xA0A5AF));
+    lv_obj_align(g_pause_t2, LV_ALIGN_CENTER, 0, 18);
+
+    // 结束：3 个扩散圆圈（原版 L331-362）
+    for (int i = 0; i < 3; i++)
+    {
+        static const uint32_t cols[3] = {0xFF3C3C, 0xC88C3C, 0x3C8CDC};
+        g_circle[i] = mk_circle(g_root, 4, lv_color_hex(cols[i]));
+        lv_obj_set_style_bg_opa(g_circle[i], LV_OPA_0, LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_border_width(g_circle[i], 2, LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_border_color(g_circle[i], lv_color_hex(cols[i]), LV_PART_MAIN | LV_STATE_DEFAULT);
+    }
+    // 结束画面（原版 L364-404）
+    g_over_title = mk_label(g_root, "游戏结束", &ui_font_cn16, lv_color_hex(0xFF3C3C));
+    lv_obj_align(g_over_title, LV_ALIGN_TOP_MID, 0, 26);
+    static const char *labels[3] = {"得分", "时间", "难度"};
+    for (int i = 0; i < 3; i++)
+    {
+        g_over_box[i] = mk_rect(g_root, 40, 70 + i * 38, 240, 30, lv_color_hex(0x14161F), 6);
+        lv_obj_set_style_border_width(g_over_box[i], 1, LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_border_color(g_over_box[i], lv_color_hex(0x282C37), LV_PART_MAIN | LV_STATE_DEFAULT);
+        g_over_lbl[i] = mk_label(g_over_box[i], labels[i], &ui_font_cn12, lv_color_hex(0x8C919B));
+        lv_obj_align(g_over_lbl[i], LV_ALIGN_LEFT_MID, 10, 0);
+        g_over_val[i] = mk_label(g_over_box[i], "-", &ui_font_cn12, lv_color_white());
+        lv_obj_align(g_over_val[i], LV_ALIGN_RIGHT_MID, -10, 0);
+    }
+    g_over_hint = mk_label(g_root, "确认:重玩   录像:回菜单", &ui_font_cn12, lv_color_hex(0x646973));
+    lv_obj_align(g_over_hint, LV_ALIGN_BOTTOM_MID, 0, -6);
+
+    // 难度菜单（原版 L486-543）
+    g_menu_title = mk_label(g_root, "弹球游戏", &ui_font_cn16, lv_color_hex(0x64C8FF));
+    lv_obj_align(g_menu_title, LV_ALIGN_TOP_MID, 0, 8);
+    g_menu_sub = mk_label(g_root, "Ball Game", &ui_font_cn12, lv_color_hex(0x50A0C8));
+    lv_obj_align(g_menu_sub, LV_ALIGN_TOP_MID, 0, 30);
+    const int cardW = 250, cardH = 34, cardX = (G_W - cardW) / 2, baseY = 52, gap = 38;
+    for (int i = 0; i < 4; i++)
+    {
+        int cy = baseY + i * gap;
+        g_menu[i] = mk_rect(g_root, cardX, cy, cardW, cardH, lv_color_hex(0x0E1016), 8);
+        lv_obj_set_style_border_width(g_menu[i], 1, LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_border_color(g_menu[i], lv_color_hex(0x23262D), LV_PART_MAIN | LV_STATE_DEFAULT);
+        mk_rect(g_menu[i], 2, 4, 4, cardH - 8, g_diffColor[i], 2); // 左侧色条（原版 L509）
+        g_menu_txt[i] = mk_label(g_menu[i], kDiffNames[i], &ui_font_cn16, lv_color_hex(0xA0A5AF));
+        lv_obj_align(g_menu_txt[i], LV_ALIGN_LEFT_MID, 14, 0);
+        g_menu_desc[i] = mk_label(g_menu[i], kDiffDescs[i], &ui_font_cn12, lv_color_hex(0x5A5F69));
+        lv_obj_align(g_menu_desc[i], LV_ALIGN_RIGHT_MID, -10, 0);
+    }
+    g_hl = mk_rect(g_root, cardX, baseY + g_diff * gap, cardW, cardH, lv_color_hex(0x121622), 8);
+    lv_obj_set_style_bg_opa(g_hl, LV_OPA_40, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_border_width(g_hl, 2, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_border_color(g_hl, g_diffColor[g_diff], LV_PART_MAIN | LV_STATE_DEFAULT);
+    g_menu_hint = mk_label(g_root, "滚轮 选择   确认 开始   菜单 退出", &ui_font_cn12,
+                           lv_color_hex(0x464B55));
+    lv_obj_align(g_menu_hint, LV_ALIGN_BOTTOM_MID, 0, -6);
+
+    g_hl_y = (float)(baseY + g_diff * gap);
+    menu_show(true);
+    play_show(false);
+    over_show(false);
+    pause_show(false);
+}
+
+// ---------------------------------------------------------------- 显隐
+static void set_vis(lv_obj_t *o, bool on)
+{
+    if (o == NULL || !lv_obj_is_valid(o))
         return;
-    uint8_t want = visible ? BG_VIS_ON : BG_VIS_OFF;
-    if (*cache == want)
-        return;
-    *cache = want;
-    if (visible)
+    if (on)
         lv_obj_clear_flag(o, LV_OBJ_FLAG_HIDDEN);
     else
         lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN);
 }
 
-static uint32_t bg_rand(void)
+static void menu_show(bool on)
 {
-    g->rng ^= g->rng << 13;
-    g->rng ^= g->rng >> 17;
-    g->rng ^= g->rng << 5;
-    return g->rng;
+    lv_obj_t *o[] = {g_menu_title, g_menu_sub, g_hl, g_menu_hint, g_menu[0], g_menu[1], g_menu[2], g_menu[3]};
+    for (unsigned i = 0; i < sizeof(o) / sizeof(o[0]); i++)
+        set_vis(o[i], on);
 }
 
-static float bg_clampf(float v, float lo, float hi)
+static void play_show(bool on)
 {
-    if (v < lo)
-        return lo;
-    if (v > hi)
-        return hi;
-    return v;
+    lv_obj_t *o[] = {g_paddle, g_paddle_hl, g_ball, g_ball_dot, g_trail[0], g_trail[1],
+                     g_hud_score, g_hud_time, g_hud_fps};
+    for (unsigned i = 0; i < sizeof(o) / sizeof(o[0]); i++)
+        set_vis(o[i], on);
 }
 
-// ============================================================================
-//  字体缺字保护：ui_font_cn16 只带 0x20-0x7f + 192 个常用汉字，
-//  缺字会渲染成占位方块。这里把 UTF-8 拆成码点逐字探一次字形。
-// ============================================================================
-static bool bg_text_ok(const char *utf8)
+static void over_show(bool on)
 {
-    if (!utf8)
-        return false;
+    lv_obj_t *o[] = {g_over_title, g_over_hint, g_over_box[0], g_over_box[1], g_over_box[2],
+                     g_circle[0], g_circle[1], g_circle[2]};
+    for (unsigned i = 0; i < sizeof(o) / sizeof(o[0]); i++)
+        set_vis(o[i], on);
+}
 
-    const unsigned char *p = (const unsigned char *)utf8;
-    while (*p)
+static void pause_show(bool on)
+{
+    set_vis(g_pause_box, on);
+    set_vis(g_pause_t1, on);
+    set_vis(g_pause_t2, on);
+    if (on)
     {
-        uint32_t cp = 0;
-        if (*p < 0x80) // ASCII（0x20-0x7f 都在字体里）
-        {
-            cp = *p;
-            p += 1;
-        }
-        else if ((*p & 0xE0) == 0xC0)
-        {
-            cp = ((uint32_t)(*p & 0x1F) << 6) | (uint32_t)(p[1] & 0x3F);
-            p += 2;
-        }
-        else if ((*p & 0xF0) == 0xE0)
-        {
-            cp = ((uint32_t)(*p & 0x0F) << 12) | ((uint32_t)(p[1] & 0x3F) << 6) |
-                 (uint32_t)(p[2] & 0x3F);
-            p += 3;
-        }
-        else
-        {
-            cp = ((uint32_t)(*p & 0x07) << 18) | ((uint32_t)(p[1] & 0x3F) << 12) |
-                 ((uint32_t)(p[2] & 0x3F) << 6) | (uint32_t)(p[3] & 0x3F);
-            p += 4;
-        }
-
-        lv_font_glyph_dsc_t dsc;
-        if (!lv_font_get_glyph_dsc(&ui_font_cn16, &dsc, cp, 0) || dsc.is_placeholder)
-            return false;
+        lv_obj_move_foreground(g_pause_box);
+        lv_obj_move_foreground(g_pause_t1);
+        lv_obj_move_foreground(g_pause_t2);
     }
-    return true;
 }
 
-// 字体里有 preferred 就用 preferred，否则退回 alt
-static const char *bg_t(const char *preferred, const char *alt)
+// ---------------------------------------------------------------- 逻辑（照抄原版）
+static void reset_game(void) // 原版 L97-121
 {
-    return bg_text_ok(preferred) ? preferred : alt;
+    g_paddle_x = (G_W - PADDLE_W) / 2;
+    g_paddle_pos = (float)g_paddle_x;
+    g_paddle_target = (float)g_paddle_x;
+    g_paddle_vel = 0.0f;
+    g_ball_x = G_W / 2.0f;
+    g_ball_y = G_H / 2.0f;
+    float base = 2.0f * kDiffFactors[g_diff] * SPEED_SCALE;
+    g_ball_sx = (rand() & 1) ? base : -base; // 原版 random(0,2)
+    g_ball_sy = -base;
+    g_score = 0;
+    g_can_score = true;
+    g_start_ms = lv_tick_get();
+    g_game_time = 0.0f;
+    g_frames = 0;
+    g_fps_t0 = g_start_ms;
+    g_pause_blink = true;
+    g_blink_ms = g_start_ms;
+    g_state = ST_PLAY;
 }
 
-// ============================================================================
-//  游戏逻辑（与 ESP32 原版 BallGame.h 一一对应）
-// ============================================================================
-
-// 铺满砖块墙（过关时也用它重铺）
-static void bg_reset_bricks(void)
+static void start_game(void)
 {
-    for (int r = 0; r < BG_BRICK_ROWS; r++)
+    reset_game();
+    menu_show(false);
+    over_show(false);
+    pause_show(false);
+    play_show(true);
+}
+
+static void go_menu(void)
+{
+    g_state = ST_MENU;
+    play_show(false);
+    over_show(false);
+    pause_show(false);
+    menu_show(true);
+    g_hl_y = (float)(52 + g_diff * 38);
+}
+
+static void update_paddle(void) // 原版 L124-135
+{
+    float diff = g_paddle_target - g_paddle_pos;
+    float accel = diff * 0.3f;
+    g_paddle_vel = g_paddle_vel * 0.7f + accel;
+    if (fabsf(g_paddle_vel) > 10.0f)
+        g_paddle_vel = (g_paddle_vel > 0) ? 10.0f : -10.0f;
+    g_paddle_pos += g_paddle_vel;
+    if (g_paddle_pos < 0)
+        g_paddle_pos = 0;
+    if (g_paddle_pos > G_W - PADDLE_W)
+        g_paddle_pos = (float)(G_W - PADDLE_W);
+    g_paddle_x = (int)(g_paddle_pos + 0.5f);
+}
+
+static void update_game(void) // 原版 L202-255
+{
+    if (g_state != ST_PLAY)
+        return;
+
+    update_paddle();
+
+    g_ball_x += g_ball_sx;
+    g_ball_y += g_ball_sy;
+
+    if (g_ball_x <= 0)
     {
-        for (int c = 0; c < BG_BRICK_COLS; c++)
+        g_ball_x = 0;
+        g_ball_sx = fabsf(g_ball_sx);
+    }
+    if (g_ball_x + BALL >= G_W)
+    {
+        g_ball_x = (float)(G_W - BALL);
+        g_ball_sx = -fabsf(g_ball_sx);
+    }
+    if (g_ball_y <= 0)
+    {
+        g_ball_y = 0;
+        g_ball_sy = fabsf(g_ball_sy);
+    }
+
+    int ptop = PADDLE_Y, pbot = PADDLE_Y + PADDLE_H;
+    if (g_ball_y + BALL >= ptop && g_ball_y + BALL <= pbot && g_ball_x + BALL >= g_paddle_x &&
+        g_ball_x <= g_paddle_x + PADDLE_W && g_can_score)
+    {
+        g_ball_y = (float)(ptop - BALL);
+        int hitPos = (int)((g_ball_x + BALL / 2) - (g_paddle_x + PADDLE_W / 2));
+        int sx = hitPos / 5;
+        if (sx > 6)
+            sx = 6;
+        if (sx < -6)
+            sx = -6;
+        g_ball_sx = (float)sx;
+        g_ball_sy = -fabsf(g_ball_sy);
+        g_score++;
+        g_can_score = false;
+        g_last_score_ms = lv_tick_get();
+        float inc = 0.12f * kDiffFactors[g_diff];
+        if (fabsf(g_ball_sx) < 7.0f)
+            g_ball_sx += (g_ball_sx > 0) ? inc : -inc;
+    }
+
+    if (g_ball_y >= G_H) // 掉球 = 结束（没有生命）
+    {
+        g_state = ST_OVER_ANIM;
+        g_anim_ms = lv_tick_get();
+        g_anim_cx = g_ball_x + BALL / 2.0f;
+        g_anim_cy = g_ball_y + BALL / 2.0f;
+        for (int i = 0; i < 3; i++)
+            lv_obj_set_size(g_circle[i], 4, 4);
+        play_show(false);
+        over_show(true);
+        set_vis(g_over_title, false);
+        for (int i = 0; i < 3; i++)
+            set_vis(g_over_box[i], false);
+        set_vis(g_over_hint, false);
+        return;
+    }
+
+    if (!g_can_score && (lv_tick_get() - g_last_score_ms > 200))
+        g_can_score = true;
+}
+
+static void update_over(void) // 原版 L331-449
+{
+    if (g_state == ST_OVER_ANIM)
+    {
+        uint32_t el = lv_tick_get() - g_anim_ms;
+        float p = el / 1500.0f;
+        if (p > 1.0f)
+            p = 1.0f;
+        float eased = 1.0f - powf(1.0f - p, 3.0f);
+        float dx = (g_anim_cx > G_W - g_anim_cx) ? g_anim_cx : (G_W - g_anim_cx);
+        float dy = (g_anim_cy > G_H - g_anim_cy) ? g_anim_cy : (G_H - g_anim_cy);
+        float maxR = sqrtf(dx * dx + dy * dy);
+        float f[3] = {eased, (p - 0.2f) / 0.8f, (p - 0.4f) / 0.6f};
+        for (int i = 0; i < 3; i++)
         {
-            g->bricks[r][c] = 1;
-            if (g->brick_obj[r][c])
-                lv_obj_clear_flag(g->brick_obj[r][c], LV_OBJ_FLAG_HIDDEN);
+            float v = f[i] < 0 ? 0 : (f[i] > 1 ? 1 : f[i]);
+            int dia = (int)(v * maxR * 2);
+            if (dia < 4)
+                dia = 4;
+            lv_obj_set_size(g_circle[i], dia, dia);
+            lv_obj_set_pos(g_circle[i], (int)g_anim_cx - dia / 2, (int)g_anim_cy - dia / 2);
+        }
+        if (p >= 1.0f)
+        {
+            g_state = ST_OVER;
+            g_over_ms = lv_tick_get();
+            for (int i = 0; i < 3; i++)
+                set_vis(g_circle[i], false);
+            set_vis(g_over_title, true);
+            for (int i = 0; i < 3; i++)
+                set_vis(g_over_box[i], true);
+            set_vis(g_over_hint, true);
+            char b[32];
+            snprintf(b, sizeof(b), "%d", g_score);
+            lv_label_set_text(g_over_val[0], b);
+            int m = (int)g_game_time / 60, s = (int)g_game_time % 60;
+            int t = (int)((g_game_time - (int)g_game_time) * 10);
+            snprintf(b, sizeof(b), "%d:%02d.%d", m, s, t);
+            lv_label_set_text(g_over_val[1], b);
+            lv_label_set_text(g_over_val[2], kDiffNames[g_diff]);
         }
     }
-    g->bricks_left = BG_BRICK_ROWS * BG_BRICK_COLS;
-}
-
-// 挡板回中（原版 resetGame() 里的 paddleX）
-static void bg_paddle_center(void)
-{
-    g->paddle_pos = (float)((BG_SCREEN_W - BG_PADDLE_W) / 2);
-    g->paddle_target = g->paddle_pos;
-    g->paddle_vel = 0.0f;
-    g->paddle_x = (int)(g->paddle_pos + 0.5f);
-}
-
-// 球贴在挡板正上方（丢命重生 / 过关 / 准备开始时都用它）
-static void bg_place_ball_on_paddle(void)
-{
-    g->ball_x = g->paddle_pos + (float)((BG_PADDLE_W - BG_BALL) / 2);
-    g->ball_y = (float)(BG_PADDLE_Y - BG_BALL);
-    g->ball_vx = 0.0f;
-    g->ball_vy = 0.0f;
-}
-
-// 进入「等待发球」状态：球跟着挡板走，倒计时结束后自动发射
-static void bg_serve_start(void)
-{
-    g->state = BG_ST_SERVE;
-    g->serve_ms = BG_SERVE_MS;
-    bg_place_ball_on_paddle();
-}
-
-// 发射（原版 resetGame()：随机左右 45 度斜射，速度 = 2.0 * 难度系数）
-static void bg_launch(void)
-{
-    float sp = BG_BASE_SPEED * g->speed_mul;
-    if (sp > BG_BALL_SPEED_MAX)
-        sp = BG_BALL_SPEED_MAX;
-
-    g->ball_speed = sp;
-    g->ball_vx = (bg_rand() & 1u) ? sp : -sp;
-    g->ball_vy = -sp;
-    g->state = BG_ST_PLAY;
-}
-
-// 过关：Lv+1、球速系数提高、砖块重铺（速度区间对应原版 diffFactors 0.8~2.2）
-static void bg_level_up(void)
-{
-    if (g->level < 99)
-        g->level++;
-
-    g->speed_mul = 1.0f + (float)(g->level - 1) * 0.25f;
-    if (g->speed_mul > BG_SPEED_MAX)
-        g->speed_mul = BG_SPEED_MAX;
-
-    g->score += 50; // 过关奖励
-    g->level_flash_ms = BG_FLASH_MS;
-    bg_reset_bricks();
-    bg_serve_start();
-}
-
-// 丢命（原版是直接 GAME OVER，这里给了 3 条命）
-static void bg_lose_life(void)
-{
-    g->lives--;
-    if (g->lives <= 0)
+    else if (g_state == ST_OVER)
     {
-        g->lives = 0;
-        g->state = BG_ST_OVER;
-        g->paddle_vel = 0.0f;
-
-        char sub[64];
-        uint32_t sec = g->total_ms / 1000;
-        // 「用时」两个字都在 ui_font_cn16 里，直接用
-        snprintf(sub, sizeof(sub), "%s %d    Lv.%d    用时 %d:%02d",
-                 g_word_score, g->score, g->level, (int)(sec / 60), (int)(sec % 60));
-        bg_show_overlay(g_word_over, sub, "确认:重开");
+        if (lv_tick_get() - g_over_ms >= 1500) // 原版 L442-444：无操作自动退出
+            go_menu();
     }
-    else
-    {
-        bg_serve_start();
-    }
-    bg_hud_update();
 }
 
-// 砖块碰撞：用「上一步的球位置」判断是从哪个面撞进来的，返回是否命中
-static bool bg_hit_brick(float prev_x, float prev_y)
+static void update_draw(void) // 原版 L258-297
 {
-    for (int r = 0; r < BG_BRICK_ROWS; r++)
+    if (g_state != ST_PLAY && g_state != ST_PAUSE)
+        return;
+
+    lv_obj_set_pos(g_paddle, g_paddle_x, PADDLE_Y);
+    lv_obj_set_pos(g_paddle_hl, g_paddle_x + 4, PADDLE_Y + 2);
+
+    int bcx = (int)g_ball_x + BALL / 2, bcy = (int)g_ball_y + BALL / 2;
+    for (int t = 2; t >= 1; t--) // 拖尾
     {
-        for (int c = 0; c < BG_BRICK_COLS; c++)
+        int tx = bcx - (int)(g_ball_sx * t * 2);
+        int ty = bcy - (int)(g_ball_sy * t * 2);
+        int dia = BALL - t * 2;
+        if (dia < 2)
+            dia = 2;
+        lv_obj_set_size(g_trail[t - 1], dia, dia);
+        lv_obj_set_pos(g_trail[t - 1], tx - dia / 2, ty - dia / 2);
+    }
+    lv_obj_set_pos(g_ball, (int)g_ball_x, (int)g_ball_y);
+    lv_obj_set_pos(g_ball_dot, (int)g_ball_x + 1, (int)g_ball_y + 1);
+
+    char b[48];
+    snprintf(b, sizeof(b), "得分 %d", g_score);
+    lv_label_set_text(g_hud_score, b);
+    if (g_state != ST_OVER)
+    {
+        int m = (int)g_game_time / 60, s = (int)g_game_time % 60;
+        int t = (int)((g_game_time - (int)g_game_time) * 10);
+        snprintf(b, sizeof(b), "%d:%02d.%d", m, s, t);
+        lv_label_set_text(g_hud_time, b);
+    }
+    snprintf(b, sizeof(b), "帧率 %.0f", g_fps);
+    lv_label_set_text(g_hud_fps, b);
+}
+
+// ---------------------------------------------------------------- 定时器
+static void tick_cb(lv_timer_t *t)
+{
+    (void)t;
+    uint32_t now = lv_tick_get();
+
+    g_frames++;
+    if (now - g_fps_t0 >= 1000)
+    {
+        g_fps = (float)g_frames;
+        g_frames = 0;
+        g_fps_t0 = now;
+    }
+
+    // 长按确认（≥1500ms）= 回难度菜单（原版长按=退出游戏）
+    if (g_enter_down && !g_enter_long && (now - g_enter_ms >= 1500))
+    {
+        g_enter_long = true;
+        go_menu();
+    }
+
+    // ---- 菜单 ----
+    if (g_state == ST_MENU)
+    {
+        while (g_left_cnt > 0)
         {
-            if (!g->bricks[r][c])
-                continue;
+            g_left_cnt--;
+            g_diff = (g_diff - 1 + 4) % 4;
+        }
+        while (g_right_cnt > 0)
+        {
+            g_right_cnt--;
+            g_diff = (g_diff + 1) % 4;
+        }
+        float target = (float)(52 + g_diff * 38); // 高亮缓动（原版 L484）
+        g_hl_y += (target - g_hl_y) * 0.22f;
+        lv_obj_set_y(g_hl, (int)g_hl_y);
+        lv_obj_set_style_border_color(g_hl, g_diffColor[g_diff], LV_PART_MAIN | LV_STATE_DEFAULT);
+        for (int i = 0; i < 4; i++)
+            lv_obj_set_style_text_color(g_menu_txt[i], (i == g_diff) ? lv_color_white()
+                                                                     : lv_color_hex(0xA0A5AF),
+                                        LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_move_foreground(g_hl);
+        while (g_enter_clicks > 0)
+        {
+            g_enter_clicks--;
+            start_game();
+            return;
+        }
+        if (g_rec_cnt > 0)
+            g_rec_cnt = 0;
+        return;
+    }
 
-            float bx = (float)(BG_BRICK_X0 + c * BG_BRICK_PITCH_X);
-            float by = (float)(BG_BRICK_Y0 + r * BG_BRICK_PITCH_Y);
-
-            // 矩形不相交 -> 换下一块
-            if (g->ball_x + BG_BALL <= bx || g->ball_x >= bx + BG_BRICK_W)
-                continue;
-            if (g->ball_y + BG_BALL <= by || g->ball_y >= by + BG_BRICK_H)
-                continue;
-
-            // 相交了：看上一帧球完全在砖块的哪一侧，决定反弹轴（角上优先算垂直反弹）
-            bool from_vertical = (prev_y + BG_BALL <= by) || (prev_y >= by + BG_BRICK_H);
-            bool from_horizontal = (prev_x + BG_BALL <= bx) || (prev_x >= bx + BG_BRICK_W);
-            if (from_horizontal && !from_vertical)
+    // ---- 对局 / 暂停 ----
+    if (g_state == ST_PLAY || g_state == ST_PAUSE)
+    {
+        while (g_left_cnt > 0) // 滚轮移挡板（原版每帧 ∓5，这里每格 ∓12）
+        {
+            g_left_cnt--;
+            g_paddle_target -= 12.0f;
+            if (g_paddle_target < 0)
+                g_paddle_target = 0;
+        }
+        while (g_right_cnt > 0)
+        {
+            g_right_cnt--;
+            g_paddle_target += 12.0f;
+            if (g_paddle_target > G_W - PADDLE_W)
+                g_paddle_target = (float)(G_W - PADDLE_W);
+        }
+        while (g_enter_clicks > 0) // 短按 = 暂停/继续（原版 L165-179）
+        {
+            g_enter_clicks--;
+            if (g_state == ST_PLAY)
             {
-                // 从左右撞进来：把球推到砖块外侧，避免下一步还嵌在里面重复判定
-                g->ball_x = (g->ball_vx > 0.0f) ? (bx - (float)BG_BALL) : (bx + (float)BG_BRICK_W);
-                g->ball_vx = -g->ball_vx;
+                g_state = ST_PAUSE;
+                pause_show(true);
+                char b[48];
+                snprintf(b, sizeof(b), "难度: %s", kDiffNames[g_diff]);
+                lv_label_set_text(g_pause_t2, b);
             }
             else
             {
-                g->ball_y = (g->ball_vy > 0.0f) ? (by - (float)BG_BALL) : (by + (float)BG_BRICK_H);
-                g->ball_vy = -g->ball_vy;
+                g_state = ST_PLAY;
+                pause_show(false);
             }
-
-            // 打掉砖块（隐藏对象，不销毁，方便下一关重铺）
-            g->bricks[r][c] = 0;
-            g->bricks_left--;
-            g->score += 10;
-            if (g->brick_obj[r][c])
-                lv_obj_add_flag(g->brick_obj[r][c], LV_OBJ_FLAG_HIDDEN);
-
-            if (g->bricks_left <= 0)
-                bg_level_up();
-
-            return true; // 一个物理步最多打掉一块（16ms 走 2~4 像素，不可能同时穿两块）
         }
-    }
-    return false;
-}
-
-// 一个固定步（16ms，= 原版一帧）的物理更新
-static void bg_step(void)
-{
-    // ---- 1) 挡板平滑移动：原版 updatePaddle() 的滤波系数原样照搬 ----
-    float diff = g->paddle_target - g->paddle_pos;
-    float accel = diff * 0.3f;
-    g->paddle_vel = g->paddle_vel * 0.7f + accel;
-    if (g->paddle_vel > 10.0f)
-        g->paddle_vel = 10.0f;
-    if (g->paddle_vel < -10.0f)
-        g->paddle_vel = -10.0f;
-    g->paddle_pos += g->paddle_vel;
-
-    if (g->paddle_pos < 0.0f)
-        g->paddle_pos = 0.0f;
-    if (g->paddle_pos > (float)(BG_SCREEN_W - BG_PADDLE_W))
-        g->paddle_pos = (float)(BG_SCREEN_W - BG_PADDLE_W);
-
-    // 到位就吸附：原版会一直在目标附近微抖，白白触发重绘，这里收一下
-    if (fabsf(diff) < 0.5f && fabsf(g->paddle_vel) < 0.5f)
-    {
-        g->paddle_pos = g->paddle_target;
-        g->paddle_vel = 0.0f;
-    }
-    g->paddle_x = (int)(g->paddle_pos + 0.5f);
-
-    // ---- 2) 准备 / 等待发球：球贴在挡板上，跟着挡板走 ----
-    if (g->state == BG_ST_READY || g->state == BG_ST_SERVE)
-    {
-        bg_place_ball_on_paddle();
-        return;
-    }
-    if (g->state != BG_ST_PLAY)
-        return;
-
-    // ---- 3) 球移动（原版：ballX += ballSpeedX; ballY += ballSpeedY）----
-    float prev_x = g->ball_x;
-    float prev_y = g->ball_y;
-    g->ball_x += g->ball_vx;
-    g->ball_y += g->ball_vy;
-
-    // 左右墙 + 顶部（游戏区上沿）反弹，和原版一致
-    if (g->ball_x <= 0.0f)
-    {
-        g->ball_x = 0.0f;
-        g->ball_vx = fabsf(g->ball_vx);
-    }
-    if (g->ball_x + (float)BG_BALL >= (float)BG_SCREEN_W)
-    {
-        g->ball_x = (float)(BG_SCREEN_W - BG_BALL);
-        g->ball_vx = -fabsf(g->ball_vx);
-    }
-    if (g->ball_y <= (float)BG_FIELD_Y)
-    {
-        g->ball_y = (float)BG_FIELD_Y;
-        g->ball_vy = fabsf(g->ball_vy);
-    }
-
-    // ---- 4) 先查砖块，再查挡板 ----
-    if (bg_hit_brick(prev_x, prev_y))
-    {
-        g->total_ms += BG_STEP_MS;
-        return;
-    }
-
-    // ---- 5) 挡板接球（原版：命中位置决定水平速度，接一次 +1 分并略微提速）----
-    if (g->ball_vy > 0.0f &&
-        g->ball_y + (float)BG_BALL >= (float)BG_PADDLE_Y &&
-        g->ball_y + (float)BG_BALL <= (float)(BG_PADDLE_Y + BG_PADDLE_H) &&
-        g->ball_x + (float)BG_BALL >= g->paddle_pos &&
-        g->ball_x <= g->paddle_pos + (float)BG_PADDLE_W)
-    {
-        // 吸附到挡板上沿（替代原版的 canScore 冷却：位置一旦抬起就不可能重复判定）
-        g->ball_y = (float)(BG_PADDLE_Y - BG_BALL);
-
-        // 接一次球略微提速（原版 ballSpeedX += 0.12 * 难度系数）
-        g->ball_speed += 0.06f * g->speed_mul;
-        if (g->ball_speed > BG_BALL_SPEED_MAX)
-            g->ball_speed = BG_BALL_SPEED_MAX;
-
-        // 命中位置 -> 出射角（原版 constrain(hitPos / 5, -6, 6)；
-        // 这里改成「保持总速率不变、只改方向」，避免球在高关卡被压成近乎水平）
-        float hit_pos = (g->ball_x + (float)BG_BALL / 2.0f) -
-                        (g->paddle_pos + (float)BG_PADDLE_W / 2.0f);
-        float vx_max = bg_clampf(g->ball_speed * 0.85f, 0.5f, BG_VX_MAX);
-        float nvx = bg_clampf(hit_pos / 8.0f, -vx_max, vx_max);
-        float nvy2 = g->ball_speed * g->ball_speed - nvx * nvx;
-        float nvy = (nvy2 > 0.25f) ? sqrtf(nvy2) : 0.5f;
-
-        g->ball_vx = nvx;
-        g->ball_vy = -nvy; // 一定向上
-        g->score += 1;
-    }
-
-    // ---- 6) 落底判负（原版：ballY >= GAME_HEIGHT）----
-    if (g->ball_y >= (float)BG_SCREEN_H)
-        bg_lose_life();
-
-    g->total_ms += BG_STEP_MS;
-}
-
-// ============================================================================
-//  画面同步：只改该改的东西，不做整屏重绘
-// ============================================================================
-static void bg_sync_objects(void)
-{
-    bool playing_visible = (g->state != BG_ST_OVER);
-
-    // 挡板（原版 GAME OVER 时不画挡板）
-    if (g_paddle)
-    {
-        bg_set_visible(g_paddle, &g->vis_paddle, playing_visible);
-        if (playing_visible)
-            lv_obj_set_pos(g_paddle, g->paddle_x, BG_PADDLE_Y);
-    }
-
-    // 球
-    if (g_ball)
-    {
-        bg_set_visible(g_ball, &g->vis_ball, playing_visible);
-        if (playing_visible)
-            lv_obj_set_pos(g_ball, (int)(g->ball_x + 0.5f), (int)(g->ball_y + 0.5f));
-    }
-
-    // 拖尾：原版是两段越来越小、越来越暗的圆，位置 = 球心 - 速度 * t * 2
-    bool trail_on = (g->state == BG_ST_PLAY);
-    if (g_trail[0])
-    {
-        for (int i = 0; i < 2; i++)
+        if (g_rec_cnt > 0)
         {
-            bg_set_visible(g_trail[i], &g->vis_trail[i], trail_on);
-            if (!trail_on)
-                continue;
-
-            int t = i + 1;                     // 1 / 2
-            int sz = (i == 0) ? 6 : 4;         // 近端大、远端小
-            float cx = g->ball_x + (float)BG_BALL / 2.0f;
-            float cy = g->ball_y + (float)BG_BALL / 2.0f;
-            int tx = (int)(cx - g->ball_vx * (float)t * 2.0f + 0.5f) - sz / 2;
-            int ty = (int)(cy - g->ball_vy * (float)t * 2.0f + 0.5f) - sz / 2;
-            lv_obj_set_pos(g_trail[i], tx, ty);
+            g_rec_cnt = 0;
+            go_menu();
+            return;
         }
-    }
-}
 
-// 顶部状态行：得分 xxx  生命 x  Lv.x（过关时短暂改成提示）
-static void bg_hud_update(void)
-{
-    if (!g_lb_hud || !lv_obj_is_valid(g_lb_hud))
-        return;
+        static uint32_t last = 0;
+        if (last == 0)
+            last = now;
+        if (g_state == ST_PLAY)
+            g_game_time += (now - last) / 1000.0f;
+        last = now;
 
-    bool flash = (g->level_flash_ms > 0);
-    char buf[48];
-    if (flash)
-        snprintf(buf, sizeof(buf), "下一关   Lv.%d", g->level); // 「下一关」字形齐全
-    else
-        snprintf(buf, sizeof(buf), "%s %d   %s %d   Lv.%d",
-                 g_word_score, g->score, g_word_life, g->lives, g->level);
+        update_game();
+        update_draw();
 
-    if (strcmp(buf, g->hud_shown) != 0)
-    {
-        lv_label_set_text(g_lb_hud, buf);
-        strncpy(g->hud_shown, buf, sizeof(g->hud_shown) - 1);
-        g->hud_shown[sizeof(g->hud_shown) - 1] = 0;
-    }
-    if ((uint8_t)(flash ? 1 : 0) != g->hud_flash_on)
-    {
-        g->hud_flash_on = flash ? 1 : 0;
-        lv_obj_set_style_text_color(g_lb_hud, flash ? BG_C_GOLD : BG_C_TEXT,
-                                    LV_PART_MAIN | LV_STATE_DEFAULT);
-    }
-}
-
-// ============================================================================
-//  遮罩层（准备 / 暂停 / 结束），盖住游戏区
-// ============================================================================
-static void bg_show_overlay(const char *title, const char *sub, const char *hint)
-{
-    if (!g_overlay || !lv_obj_is_valid(g_overlay))
-        return;
-
-    lv_label_set_text(g_ov_title, title ? title : "");
-    lv_label_set_text(g_ov_sub, sub ? sub : "");
-    lv_label_set_text(g_ov_hint, hint ? hint : "");
-
-    lv_obj_clear_flag(g_overlay, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_move_foreground(g_overlay); // 保证压在所有砖块/球/挡板上面
-}
-
-static void bg_hide_overlay(void)
-{
-    if (g_overlay && lv_obj_is_valid(g_overlay))
-        lv_obj_add_flag(g_overlay, LV_OBJ_FLAG_HIDDEN);
-}
-
-// 开新局：分数/生命/关卡复位，砖块重铺，短暂等待后自动发球
-static void bg_new_game(void)
-{
-    g->score = 0;
-    g->lives = BG_LIVES;
-    g->level = 1;
-    g->speed_mul = 1.0f;
-    g->ball_speed = BG_BASE_SPEED;
-    g->total_ms = 0;
-    g->acc_ms = 0;
-    g->level_flash_ms = 0;
-    g->hud_flash_on = 0;
-
-    bg_paddle_center();
-    bg_reset_bricks();
-    bg_hide_overlay();
-    bg_serve_start();
-    bg_hud_update();
-}
-
-// 确认键 / 电源键：开始 / 暂停 / 继续 / 重开
-static void bg_on_confirm(void)
-{
-    switch (g->state)
-    {
-    case BG_ST_READY:
-        bg_new_game();
-        break;
-
-    case BG_ST_PLAY:
-        g->state = BG_ST_PAUSE;
-        g->paddle_vel = 0.0f;
-        // 「确认:恢复」字形齐全；标题在缺字时会退化成「不动」
-        bg_show_overlay(g_word_pause, "左右:移动", "确认:恢复");
-        break;
-
-    case BG_ST_PAUSE:
-        g->state = BG_ST_PLAY;
-        bg_hide_overlay();
-        break;
-
-    case BG_ST_SERVE:
-        bg_launch(); // 不想等就立刻发球
-        break;
-
-    case BG_ST_OVER:
-        bg_new_game();
-        break;
-
-    default:
-        break;
-    }
-}
-
-// 滚轮左右：只改目标位置，真正的位移交给固定步长里的滤波（原版也是这样）
-static void bg_paddle_move(int step)
-{
-    if (!g || g->state == BG_ST_OVER)
-        return;
-
-    g->paddle_target += (float)step;
-    if (g->paddle_target < 0.0f)
-        g->paddle_target = 0.0f;
-    if (g->paddle_target > (float)(BG_SCREEN_W - BG_PADDLE_W))
-        g->paddle_target = (float)(BG_SCREEN_W - BG_PADDLE_W);
-}
-
-// ============================================================================
-//  心跳：固定步长推进物理 + 同步画面（绝不 sleep / 死循环）
-// ============================================================================
-static void bg_timer_cb(lv_timer_t *timer)
-{
-    (void)timer;
-    if (!g || !g_root)
-        return;
-
-    uint32_t now = lv_tick_get();
-    uint32_t dt = lv_tick_elaps(g->last_tick);
-    g->last_tick = now;
-    if (dt > 150)
-        dt = 150; // 被别的界面长时间占住时不要一次补太多步
-
-    // 先消费按键命令（开始/暂停/继续/重开）：只有这里会动 lv_obj，保证在 LVGL 线程
-    if (g_pending_cmd)
-    {
-        g_pending_cmd = 0;
-        bg_on_confirm();
-    }
-
-    // 倒计时（不参与物理步长）
-    if (g->level_flash_ms > 0)
-    {
-        g->level_flash_ms -= (int)dt;
-        if (g->level_flash_ms < 0)
-            g->level_flash_ms = 0;
-    }
-    if (g->state == BG_ST_SERVE)
-    {
-        g->serve_ms -= (int)dt;
-        if (g->serve_ms <= 0)
-            bg_launch();
-    }
-
-    // 固定步长（16ms/步 = 原版一帧），最多补 BG_MAX_STEPS 步
-    g->acc_ms += dt;
-    int steps = 0;
-    while (g->acc_ms >= BG_STEP_MS && steps < BG_MAX_STEPS)
-    {
-        g->acc_ms -= BG_STEP_MS;
-        steps++;
-        bg_step();
-    }
-    if (g->acc_ms > (uint32_t)(BG_STEP_MS * BG_MAX_STEPS))
-        g->acc_ms = 0;
-
-    bg_sync_objects();
-    bg_hud_update();
-}
-
-// ============================================================================
-//  界面搭建
-// ============================================================================
-static void bg_build_hud(lv_obj_t *root)
-{
-    // 状态行底色 + 一条 1px 分隔线（用方条画，避免容器 padding 影响绝对坐标）
-    lv_obj_t *bar = lv_obj_create(root);
-    bg_plain(bar);
-    lv_obj_set_pos(bar, 0, 0);
-    lv_obj_set_size(bar, BG_SCREEN_W, BG_HUD_H);
-    bg_set_bg(bar, BG_C_HUD);
-
-    lv_obj_t *line = lv_obj_create(root);
-    bg_plain(line);
-    lv_obj_set_pos(line, 0, BG_HUD_H - 1);
-    lv_obj_set_size(line, BG_SCREEN_W, 1);
-    bg_set_bg(line, BG_C_LINE);
-
-    // 状态行文字：得分 / 生命 / Lv（16px 字体在 22px 行里放得下）
-    g_lb_hud = lv_label_create(root);
-    lv_obj_set_style_text_font(g_lb_hud, &ui_font_cn16, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_text_color(g_lb_hud, BG_C_TEXT, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_pos(g_lb_hud, 6, 2);
-    lv_label_set_text(g_lb_hud, "");
-}
-
-static void bg_build_bricks(lv_obj_t *root)
-{
-    for (int r = 0; r < BG_BRICK_ROWS; r++)
-    {
-        for (int c = 0; c < BG_BRICK_COLS; c++)
+        // 暂停时闪烁（原版 L302-307）
+        if (g_state == ST_PAUSE)
         {
-            lv_obj_t *b = lv_obj_create(root);
-            bg_plain(b);
-            lv_obj_set_size(b, BG_BRICK_W, BG_BRICK_H);
-            lv_obj_set_pos(b, BG_BRICK_X0 + c * BG_BRICK_PITCH_X,
-                           BG_BRICK_Y0 + r * BG_BRICK_PITCH_Y);
-            bg_set_bg(b, lv_color_hex(kBgBrickColors[r]));
-            lv_obj_set_style_radius(b, 3, LV_PART_MAIN | LV_STATE_DEFAULT);
-            // 一圈 30% 白描边，做出砖块的立体感
-            lv_obj_set_style_border_width(b, 1, LV_PART_MAIN | LV_STATE_DEFAULT);
-            lv_obj_set_style_border_color(b, lv_color_hex(0xFFFFFF),
-                                          LV_PART_MAIN | LV_STATE_DEFAULT);
-            lv_obj_set_style_border_opa(b, LV_OPA_30, LV_PART_MAIN | LV_STATE_DEFAULT);
-
-            g->brick_obj[r][c] = b;
+            if (now - g_blink_ms >= 400)
+            {
+                g_blink_ms = now;
+                g_pause_blink = !g_pause_blink;
+                set_vis(g_pause_t1, g_pause_blink);
+            }
         }
+        return;
     }
-}
 
-static void bg_build_paddle(lv_obj_t *root)
-{
-    g_paddle = lv_obj_create(root);
-    bg_plain(g_paddle);
-    lv_obj_set_size(g_paddle, BG_PADDLE_W, BG_PADDLE_H);
-    lv_obj_set_pos(g_paddle, (BG_SCREEN_W - BG_PADDLE_W) / 2, BG_PADDLE_Y);
-    bg_set_bg(g_paddle, BG_C_PADDLE);
-    lv_obj_set_style_radius(g_paddle, 4, LV_PART_MAIN | LV_STATE_DEFAULT);
-
-    // 高光条做成挡板的子对象：父对象一动它就跟着动，不用单独同步
-    lv_obj_t *hi = lv_obj_create(g_paddle);
-    bg_plain(hi);
-    lv_obj_set_size(hi, BG_PADDLE_W - 8, 2);
-    lv_obj_set_pos(hi, 4, 2);
-    bg_set_bg(hi, BG_C_PADDLE_HI);
-    lv_obj_set_style_radius(hi, 1, LV_PART_MAIN | LV_STATE_DEFAULT);
-}
-
-static void bg_build_ball(lv_obj_t *root)
-{
-    // 拖尾两段（先建，behind 球）
-    for (int i = 0; i < 2; i++)
+    // ---- 结束 ----
+    if (g_state == ST_OVER_ANIM || g_state == ST_OVER)
     {
-        int sz = (i == 0) ? 6 : 4;
-        lv_obj_t *t = lv_obj_create(root);
-        bg_plain(t);
-        lv_obj_set_size(t, sz, sz);
-        bg_set_bg(t, i == 0 ? BG_C_TRAIL0 : BG_C_TRAIL1);
-        lv_obj_set_style_radius(t, LV_RADIUS_CIRCLE, LV_PART_MAIN | LV_STATE_DEFAULT);
-        lv_obj_add_flag(t, LV_OBJ_FLAG_HIDDEN);
-        g_trail[i] = t;
+        while (g_enter_clicks > 0)
+        {
+            g_enter_clicks--;
+            start_game(); // 确认 = 重玩
+            return;
+        }
+        if (g_rec_cnt > 0)
+        {
+            g_rec_cnt = 0;
+            go_menu();
+            return;
+        }
+        update_over();
     }
-
-    g_ball = lv_obj_create(root);
-    bg_plain(g_ball);
-    lv_obj_set_size(g_ball, BG_BALL, BG_BALL);
-    bg_set_bg(g_ball, BG_C_BALL);
-    lv_obj_set_style_radius(g_ball, LV_RADIUS_CIRCLE, LV_PART_MAIN | LV_STATE_DEFAULT);
 }
 
-static void bg_build_overlay(lv_obj_t *root)
-{
-    g_overlay = lv_obj_create(root);
-    bg_plain(g_overlay);
-    lv_obj_set_pos(g_overlay, 0, BG_FIELD_Y);
-    lv_obj_set_size(g_overlay, BG_SCREEN_W, BG_FIELD_H);
-    lv_obj_set_style_bg_color(g_overlay, BG_C_OVERLAY, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_bg_opa(g_overlay, LV_OPA_80, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_pad_all(g_overlay, 10, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_pad_row(g_overlay, 6, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_flex_flow(g_overlay, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(g_overlay, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
-                          LV_FLEX_ALIGN_CENTER);
-
-    g_ov_title = lv_label_create(g_overlay);
-    lv_obj_set_style_text_font(g_ov_title, &ui_font_cn16, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_text_color(g_ov_title, BG_C_TEXT, LV_PART_MAIN | LV_STATE_DEFAULT);
-
-    g_ov_sub = lv_label_create(g_overlay);
-    lv_obj_set_style_text_font(g_ov_sub, &ui_font_cn16, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_text_color(g_ov_sub, BG_C_DIM, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_label_set_long_mode(g_ov_sub, LV_LABEL_LONG_WRAP);
-    lv_obj_set_width(g_ov_sub, BG_SCREEN_W - 40);
-    lv_obj_set_style_text_align(g_ov_sub, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN | LV_STATE_DEFAULT);
-
-    g_ov_hint = lv_label_create(g_overlay);
-    lv_obj_set_style_text_font(g_ov_hint, &ui_font_cn16, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_text_color(g_ov_hint, BG_C_GOLD, LV_PART_MAIN | LV_STATE_DEFAULT);
-}
-
-// ============================================================================
-//  插件导出接口
-// ============================================================================
+// ---------------------------------------------------------------- ABI
 extern "C" const lios_app_info_t lios_app_info = {
-    "ball",     // id（权限存储用）
-    "彩色块",   // 桌面显示名（字体里没有「弹/球/游/戏」，桌面上直接显示 info.name，
-                //           不会走 bg_t 的缺字回退，所以这里必须用字体里有的字）
-    "块",       // 图标
-    20,         // 排序（小的在前）
-    1           // 需要独占整屏
+    "ball",       // id
+    "弹球游戏",   // 名称（字体已有这些字）
+    "球",         // 图标
+    20,           // 顺序
+    1             // 独占整屏
 };
 
 extern "C" lv_obj_t *lios_app_create(lv_obj_t *parent)
 {
-    // 保险：万一桌面没调 destroy 就又进来一次
-    if (g)
-    {
-        free(g);
-        g = NULL;
-    }
+    g_left_cnt = g_right_cnt = g_rec_cnt = 0;
+    g_enter_down = false;
+    g_enter_long = false;
+    g_enter_clicks = 0;
+    g_state = ST_MENU;
+    g_fps = 0.0f;
+    g_frames = 0;
+    g_fps_t0 = lv_tick_get();
+    srand((unsigned)lv_tick_get());
 
-    g = (bg_game_t *)calloc(1, sizeof(bg_game_t));
-    if (!g)
-        return NULL;
-
-    // 简易随机种子（不用 rand()，省一次 libc 依赖）
-    g->rng = (uint32_t)time(NULL) ^ 0x9E3779B9u;
-    if (g->rng == 0)
-        g->rng = 0x12345678u;
-
-    // 字形探测：ui_font_cn16 缺「得/分/暂/停/弹/球…」，缺了就换成字体里有的说法
-    g_word_title = bg_t("弹球游戏", "PONG");
-    g_word_score = bg_t("得分", "计数");
-    g_word_life = bg_t("生命", "命数");
-    g_word_pause = bg_t("暂停", "不动");
-    g_word_over = bg_t("游戏结束", "结束");
-
-    g_root = NULL;
-    g_lb_hud = NULL;
-    g_paddle = NULL;
-    g_ball = NULL;
-    g_trail[0] = g_trail[1] = NULL;
-    g_overlay = g_ov_title = g_ov_sub = g_ov_hint = NULL;
-
-    // 最外层容器：铺满 320x240，纯黑，不滚动
-    g_root = lv_obj_create(parent);
-    lv_obj_clear_flag(g_root, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_pos(g_root, 0, 0);
-    lv_obj_set_size(g_root, BG_SCREEN_W, BG_SCREEN_H);
-    bg_set_bg(g_root, BG_C_FIELD);
-    lv_obj_set_style_border_width(g_root, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_radius(g_root, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_pad_all(g_root, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_text_font(g_root, &ui_font_cn16, LV_PART_MAIN | LV_STATE_DEFAULT);
-
-    // 初始状态：等确认键开始
-    g->state = BG_ST_READY;
-    g->score = 0;
-    g->lives = BG_LIVES;
-    g->level = 1;
-    g->speed_mul = 1.0f;
-    g->ball_speed = BG_BASE_SPEED;
-    g->bricks_left = 0;
-    g->last_tick = lv_tick_get();
-    g->vis_paddle = g->vis_ball = BG_VIS_UNKNOWN;
-    g->vis_trail[0] = g->vis_trail[1] = BG_VIS_UNKNOWN;
-    g->hud_flash_on = 0;
-    g->hud_shown[0] = 0;
-    g_pending_cmd = 0;
-
-    bg_paddle_center();
-    bg_place_ball_on_paddle();
-
-    // 建控件：状态行 -> 砖块 -> 挡板 -> 球 -> 遮罩（顺序 = 图层顺序）
-    bg_build_hud(g_root);
-    bg_build_bricks(g_root);
-    bg_build_paddle(g_root);
-    bg_build_ball(g_root);
-    bg_build_overlay(g_root);
-
-    bg_reset_bricks();
-    bg_hud_update();
-    bg_sync_objects();
-    bg_show_overlay(g_word_title, bg_t("滚轮左右:移动挡板", "左右:移动"), "确认:开始");
-
-    // 游戏心跳：30ms 一次，物理内部按 16ms 固定步长补，绝不 sleep
-    g_timer = lv_timer_create(bg_timer_cb, BG_TIMER_MS, NULL);
-
+    build_all(parent);
+    if (g_timer == NULL)
+        g_timer = lv_timer_create(tick_cb, FRAME_MS, NULL);
+    lios_log("弹球游戏：已启动（原始玩法：纯对打，无砖块无生命）");
     return g_root;
 }
 
 extern "C" void lios_app_destroy(void)
 {
-    // 先停心跳，避免 LVGL 之后再回调到已经释放的数据
-    if (g_timer)
+    if (g_timer != NULL)
     {
         lv_timer_del(g_timer);
         g_timer = NULL;
     }
-    g_pending_cmd = 0;
-
-    // LVGL 对象由桌面容器统一删除，这里只把本地指针清空（防止野指针）
+    // LVGL 对象随桌面容器一起删；这里只清指针
     g_root = NULL;
-    g_lb_hud = NULL;
-    g_paddle = NULL;
-    g_ball = NULL;
+    g_hud_score = g_hud_time = g_hud_fps = NULL;
+    g_paddle = g_paddle_hl = NULL;
+    g_ball = g_ball_dot = NULL;
     g_trail[0] = g_trail[1] = NULL;
-    g_overlay = g_ov_title = g_ov_sub = g_ov_hint = NULL;
-
-    // 释放自己 calloc 的游戏数据（砖块对象指针数组在这个结构体里，一起回收）
-    if (g)
+    for (int i = 0; i < 4; i++)
+        g_menu[i] = g_menu_txt[i] = g_menu_desc[i] = NULL;
+    g_menu_title = g_menu_sub = g_menu_hint = g_hl = NULL;
+    g_pause_box = g_pause_t1 = g_pause_t2 = NULL;
+    g_over_title = g_over_hint = NULL;
+    for (int i = 0; i < 3; i++)
     {
-        free(g);
-        g = NULL;
+        g_over_box[i] = g_over_lbl[i] = g_over_val[i] = NULL;
+        g_circle[i] = NULL;
     }
+    lios_log("弹球游戏：已退出并清理");
 }
 
 extern "C" void lios_app_key(int key, int event)
 {
-    if (!g || !g_root)
-        return;
-
-    // 抬起事件不用管：滚轮每转一格就是一次「按下」，没有长按连发需求
     if (event == LIOS_EV_RELEASE)
+    {
+        if (key == LIOS_KEY_ENTER)
+        {
+            if (g_enter_down)
+            {
+                g_enter_down = false;
+                if (!g_enter_long)
+                    g_enter_clicks++; // 短按才算一次点击
+            }
+        }
         return;
-
+    }
+    // PRESS / LONG
     switch (key)
     {
     case LIOS_KEY_LEFT:
-    case LIOS_KEY_UP: // 兜底：个别固件把滚轮上报成上下，也当左右用
-        bg_paddle_move(-BG_KEY_STEP);
+        if (g_left_cnt < 16)
+            g_left_cnt++;
         break;
-
     case LIOS_KEY_RIGHT:
-    case LIOS_KEY_DOWN:
-        bg_paddle_move(+BG_KEY_STEP);
+        if (g_right_cnt < 16)
+            g_right_cnt++;
         break;
-
+    case LIOS_KEY_REC:
+        if (g_rec_cnt < 4)
+            g_rec_cnt++;
+        break;
     case LIOS_KEY_ENTER:
-    case LIOS_KEY_POWER:
-        // 只在「按下」时响应，按住确认键不会连续重开；
-        // 这里只置标志，真正动控件交给 bg_timer_cb（LVGL 线程）
-        if (event == LIOS_EV_PRESS)
-            g_pending_cmd = 1;
+        if (!g_enter_down)
+        {
+            g_enter_down = true;
+            g_enter_ms = lv_tick_get();
+            g_enter_long = false;
+        }
         break;
-
-    case LIOS_KEY_BACK:
     default:
-        // BACK 交给桌面统一处理退出，这里不拦截
-        break;
+        break; // 菜单键由桌面负责关页面
     }
 }

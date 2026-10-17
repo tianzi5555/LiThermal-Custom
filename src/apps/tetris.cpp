@@ -301,7 +301,10 @@ static void tw_update_speed(void)
     g->drop_interval = p;
 
     if (g_timer)
-        lv_timer_set_period(g_timer, (uint32_t)g->drop_interval);
+        // 注意：定时器必须保持固定 20ms 周期！drop_tick 每回调 +20ms，
+    // 达到 drop_interval 才落一格。之前这里把周期设成 drop_interval，
+    // 导致要 25 次 × 500ms = 12.5 秒才落一格 → 表现为「不会自动下落」。
+    // 所以这里不改周期（只更新 drop_interval 供累加比较用）。
 }
 
 // 生成下一个方块
@@ -503,7 +506,7 @@ static void tw_show_ready(void)
 {
     // 注意：ui_font_cn16 里没有「俄/罗/斯/游/戏」这些字（字体是子集化的），
     // 直接写会渲染成空方块。这里只用字体里确实有的字，别改回原标题。
-    tw_overlay_show("方块", TW_C_LEVEL, "左边是方块区", "确认键开始");
+    tw_overlay_show("俄罗斯方块", TW_C_LEVEL, "左边是方块区", "确认键开始");
 }
 
 static void tw_show_over(void)
@@ -756,7 +759,7 @@ static void tw_build_panel(lv_obj_t *root)
 // ============================================================================
 extern "C" const lios_app_info_t lios_app_info = {
     "tetris",         // id
-    "方块",         // 桌面显示名（字体里没有俄/罗/斯）
+    "俄罗斯方块",   // 桌面显示名（字体已重新生成，含俄/罗/斯/方/块）
     "方",             // 图标
     30,               // 排序
     1                 // 需要独占整屏
