@@ -496,6 +496,8 @@ static void card_close(void)
     s_sh_label = NULL;
     s_sh_box = NULL;
     s_sh_last_len = 0;
+    if (s_kb == NULL)
+        lios_desktop_set_wheel_focus(true); // 恢复文件列表的 LVGL 焦点滚轮
     s_kb = NULL;
     s_card = NULL;
     s_card_cb = NULL;
@@ -707,6 +709,9 @@ static void show_sh_result(void)
             if (lv_group_get_default() != NULL)
                 lv_group_remove_obj(s_rows[i]); // 焦点留在卡片里，滚轮绝不串到文件列表
         }
+    // 滚轮改由页面自己收（page_wheel 里手动滚 box）：
+    // LVGL 的滚轮只移动焦点不滚动容器，而 box 是单个对象没有子焦点项 -> 滚轮原地打转
+    lios_desktop_set_wheel_focus(false);
     lv_group_focus_obj(box);
 }
 
@@ -1114,12 +1119,19 @@ static void page_tick(void)
 // 页面自己收滚轮（查看器里滚文本；桌面只在 !wheel_focus 时才回调这里）
 static void page_wheel(int diff)
 {
+    // sh 结果卡开着：手动滚输出容器（LVGL 滚轮只动焦点不滚容器）
+    if (s_sh_box != NULL && lv_obj_is_valid(s_sh_box))
+    {
+        lv_obj_scroll_by_bounded(s_sh_box, 0, -(diff * 12), LV_ANIM_ON);
+        return;
+    }
     if (viewer_is_open())
         viewer_wheel(diff);
 }
 
 static void page_destroy(void)
 {
+    lios_desktop_set_wheel_focus(true); // 离开页面恢复 LVGL 滚轮
     // 关键：退出文件管理器时若查看器还开着，必须停了它的解码线程并释放缓冲
     if (viewer_is_open())
         viewer_close();
