@@ -31,6 +31,9 @@
 #include <stdlib.h>
 #include <time.h>
 
+// 前置声明：tw_show_over 在定义之前就被调用（编译报 was not declared）
+static void tw_show_over(void);
+
 // ---------------------------------------------------------------- 尺寸常量
 #define TW_COLS 10        // 游戏区列数
 #define TW_ROWS 20        // 游戏区行数
