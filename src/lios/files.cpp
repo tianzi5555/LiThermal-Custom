@@ -355,11 +355,18 @@ static void card_close(void)
         lv_obj_del(s_card);
     s_card = NULL;
     s_card_cb = NULL;
+    // 卡片关掉：把可见行放回默认组，并让组内焦点循环（滚到底回第一个）
+    if (lv_group_get_default() != NULL)
+        lv_group_set_wrap(lv_group_get_default(), true);
     for (int i = 0; i < MAX_ROWS; i++)
         if (s_rows[i] != NULL && lv_obj_is_valid(s_rows[i]))
         {
             if (i < s_shown)
+            {
                 lv_obj_add_flag(s_rows[i], LV_OBJ_FLAG_CLICK_FOCUSABLE);
+                if (lv_group_get_default() != NULL)
+                    lv_group_add_obj(lv_group_get_default(), s_rows[i]);
+            }
             else
                 lv_obj_clear_flag(s_rows[i], LV_OBJ_FLAG_CLICK_FOCUSABLE); // 隐藏行永不参与焦点
         }
@@ -399,9 +406,14 @@ static void card_show(const char *text, const char *const *btns, int n, void (*c
     lv_label_set_text(t, text);
     lv_obj_set_pos(t, 0, 0);
 
+    // 关键：把这些行**从默认 LVGL 组里摘掉**，否则滚轮焦点还会跑到卡片后面的文件行上
     for (int i = 0; i < MAX_ROWS; i++)
         if (s_rows[i] != NULL && lv_obj_is_valid(s_rows[i]))
+        {
             lv_obj_clear_flag(s_rows[i], LV_OBJ_FLAG_CLICK_FOCUSABLE);
+            if (lv_group_get_default() != NULL)
+                lv_group_remove_obj(s_rows[i]);
+        }
 
     lv_obj_t *first = NULL;
     for (int i = 0; i < n; i++)
@@ -594,6 +606,20 @@ static void go_parent(void)
 // 点文件：按类型真打开（图片/视频/文本 -> 查看器；其它 -> 信息卡片）
 static void open_file(int idx)
 {
+    // .sh 脚本：先给「执行脚本 / 看内容 / 取消」，不要直接丢给文本查看器
+    {
+        size_t nl = strlen(s_names[idx]);
+        if (nl > 3 && strcasecmp(s_names[idx] + nl - 3, ".sh") == 0)
+        {
+            char sz[24], msg[320];
+            human_size(s_size[idx], sz, sizeof(sz));
+            snprintf(msg, sizeof(msg), "%s\n大小：%s\n这是 shell 脚本，可以执行：", s_names[idx], sz);
+            const char *btns[] = {"执行脚本", "看内容", "取消"};
+            card_show(msg, btns, 3, sh_action_cb);
+            return;
+        }
+    }
+
     char full[PATH_MAX_LEN + NAME_MAX_LEN + 2];
     snprintf(full, sizeof(full), "%s/%s", s_cwd, s_names[idx]);
 
@@ -920,6 +946,10 @@ void page_files_create(lv_obj_t *parent)
     lv_obj_set_style_text_color(s_hint, lv_color_hex(0x7D8A97), LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_label_set_text(s_hint, "正在读取…");
     lv_obj_align(s_hint, LV_ALIGN_BOTTOM_LEFT, 4, -2);
+
+    // 组内焦点循环：滚到底自动回到第一个（用户反馈过到底不回第一个）
+    if (lv_group_get_default() != NULL)
+        lv_group_set_wrap(lv_group_get_default(), true);
 
     lios_page_set_hooks(&s_hooks);
     lios_log("文件管理：页面已建，开始扫描 %s", START_DIR);
