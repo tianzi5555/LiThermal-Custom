@@ -165,22 +165,19 @@ static void btn_clear_logs_cb(lv_event_t *e)
             "echo \"可用 ${b}KB -> ${a}KB\"");
 }
 
-// 进 LiOS：写标记文件后**退出相机进程**，由 /mnt/UDISK/thermalcamera.sh 接手启动 /mnt/UDISK/lios。
-// 这样两个程序是平级的独立进程，互不影响，也不会有模式切换/锁的问题。
+// 退出到桌面：直接退出相机进程。
+// 桌面程序（/mnt/UDISK/lios）是父进程，它 fork 出本进程并 waitpid，
+// 这里一退出它就会把显示收回、重绘桌面。
+//
+// 相机本身**不知道也不关心**桌面的存在：这里就是普通 exit(0)。
 static void btn_lios_cb(lv_event_t *e)
 {
     (void)e;
-    ui_trace("terminal: 按「进LiOS」-> 写 /tmp/lios_mode=lios 并退出相机进程");
-    FILE *f = fopen("/tmp/lios_mode", "w");
-    if (f != NULL)
-    {
-        fputs("lios", f);
-        fclose(f);
-    }
+    ui_trace("terminal: 按「退出到桌面」-> 保存设置并退出相机进程");
     settings_save();          // 先把相机设置落盘（和正常退出一样）
-    videoPlayer.disconnect(); // 断开 RTSP，把显示/网络让给 lios
+    videoPlayer.disconnect(); // 断开 RTSP，把显示/网络让出来
     sync();
-    _exit(0); // 退出码 0：启动脚本会看到 lios 标记并去跑 lios
+    _exit(0); // 父进程（lios 桌面）会 waitpid 到它并重绘桌面
 }
 
 // ---------------------------------------------------------------- 页面
@@ -237,7 +234,8 @@ void menu_terminal_show(void)
     lv_obj_center(l3);
     lv_obj_add_event_cb(b3, btn_clear_logs_cb, LV_EVENT_CLICKED, NULL);
 
-    // LiOS 第二期：相机 → LiOS 桌面的入口（放在这个隐藏终端里，不改任何现有操作习惯）
+    // 退出到桌面：相机退出后，桌面程序（/mnt/UDISK/lios）会收回显示并重绘桌面。
+    // 放在这个隐藏终端里，不新增任何界面、不改现有操作习惯。
     lv_obj_t *b4 = lv_btn_create(root);
     lv_obj_set_size(b4, 60, 26);
     lv_obj_set_pos(b4, TERM_BTN_X + TERM_BTN_PITCH * 3, 0);
@@ -245,7 +243,7 @@ void menu_terminal_show(void)
     lv_obj_set_style_pad_all(b4, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_bg_color(b4, lv_color_hex(0x2F5D8A), LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_t *l4 = lv_label_create(b4);
-    lv_label_set_text(l4, "进LiOS");
+    lv_label_set_text(l4, "回桌面");
     lv_obj_set_style_text_font(l4, &ui_font_cn16, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_center(l4);
     lv_obj_add_event_cb(b4, btn_lios_cb, LV_EVENT_CLICKED, NULL);
