@@ -26,6 +26,13 @@ static lv_obj_t *s_grid = NULL;  // 网格容器
 static lv_obj_t *s_hint = NULL;  // 底部提示行
 static lv_obj_t *s_page = NULL;  // 当前应用页（NULL = 在网格）
 static int s_page_idx = -1;
+static bool s_page_wheel_focus = false;              // 当前页面是否要 LVGL 滚轮焦点
+static const lios_page_hooks_t *s_page_hooks = NULL; // 当前页面的钩子（真页面用）
+
+void lios_page_set_hooks(const lios_page_hooks_t *hooks)
+{
+    s_page_hooks = hooks;
+}
 
 // 打开第 idx 个应用的页面（UI 线程、已持锁）
 static void desktop_open(int idx);
@@ -89,6 +96,8 @@ static void desktop_open(int idx)
         return;
 
     lios_log("桌面：打开应用 %s", app->id);
+    s_page_hooks = NULL;
+    s_page_wheel_focus = app->wheel_focus;
     s_page = lv_obj_create(lv_scr_act());
     lv_obj_set_size(s_page, 320, 240);
     lv_obj_set_pos(s_page, 0, 0);
@@ -100,13 +109,15 @@ static void desktop_open(int idx)
     lv_obj_set_style_bg_opa(s_page, LV_OPA_COVER, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_move_foreground(s_page);
 
+    // 列表类页面（wheel_focus=true）自己用滚轮走焦点；占位页关掉编码器输入，
+    // 免得滚轮/确认去动背后桌面上的方块
+    lv_indev_enable(NULL, app->wheel_focus);
+
     if (app->create != NULL)
         app->create(s_page);
     else
         placeholder_create(s_page, app->name);
 
-    // 页面里不参与焦点导航：把编码器输入关掉，滚轮/确认不会再去动桌面方块
-    lv_indev_enable(NULL, false);
     s_page_idx = idx;
     set_hint("菜单键 / 录像键 返回桌面");
     lv_obj_invalidate(s_page);
@@ -120,6 +131,10 @@ static void desktop_close_page(void)
     lios_log("桌面：关闭应用页 %s", (s_page_idx >= 0 && s_page_idx < LIOS_APP_COUNT)
                                         ? LIOS_APPS[s_page_idx].id
                                         : "?");
+    if (s_page_hooks != NULL && s_page_hooks->destroy != NULL)
+        s_page_hooks->destroy();
+    s_page_hooks = NULL;
+    s_page_wheel_focus = false;
     if (lv_obj_is_valid(s_page))
         lv_obj_del(s_page);
     s_page = NULL;
@@ -207,13 +222,35 @@ void lios_desktop_tick(void)
     if (lios_power_key_check())
         return;
 
+    // 页面钩子每帧（真页面在这里取 worker 线程的结果、更新界面）
+    if (s_page != NULL && s_page_hooks != NULL && s_page_hooks->tick != NULL)
+        s_page_hooks->tick();
+
     bool menu = lios_key_take(LIOS_K_MENU);
     bool rec = lios_key_take(LIOS_K_REC);
     bool enter = lios_key_take(LIOS_K_ENTER);
 
     if (s_page != NULL)
     {
-        // 页面里：菜单键 / 录像键 / 波轮按下 都回桌面
+        // 先给页面自己处理的机会（真页面：文件管理器要「上/下级」「操作菜单」）
+        if (s_page_hooks != NULL)
+        {
+            if (menu && s_page_hooks->key != NULL && s_page_hooks->key(LIOS_K_MENU))
+                menu = false;
+            if (rec && s_page_hooks->key != NULL && s_page_hooks->key(LIOS_K_REC))
+                rec = false;
+            if (enter && s_page_hooks->key != NULL && s_page_hooks->key(LIOS_K_ENTER))
+                enter = false;
+        }
+        else
+        {
+            // 页面没消费掉的确认键：
+            //   * 需要滚轮焦点的页面（列表类）：交给 LVGL 点击，桌面不抢
+            //   * 占位页：当作「返回」
+            if (enter && s_page_wheel_focus)
+                enter = false;
+        }
+
         if (menu || rec || enter)
         {
             lios_log("返回：%s -> 回桌面", menu ? "菜单键" : (rec ? "录像键" : "确认键"));

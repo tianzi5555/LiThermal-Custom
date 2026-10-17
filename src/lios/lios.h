@@ -63,10 +63,26 @@ typedef struct
     const char *name;   // 方块上显示的名字
     const char *icon;   // 1~2 个汉字/符号
     lv_obj_t *(*create)(lv_obj_t *parent); // 建页面；NULL = 用「建设中」占位页
+    bool wheel_focus;   // true = 页面里让滚轮/波轮按下走 LVGL 焦点（列表类页面要）
 } lios_app_def_t;
 
 extern const lios_app_def_t LIOS_APPS[];
 extern const int LIOS_APP_COUNT;
+
+// 页面钩子：真页面自己接管按键 / 每帧 / 销毁（都在 UI 线程、已持锁时调用）
+// 注意：这些回调里**绝不做文件 I/O、绝不 LOCKLV()**（锁已在外层持有）
+typedef struct
+{
+    // 返回 true = 这次按键页面自己处理了（桌面不要关页面）
+    bool (*key)(int key);
+    void (*tick)(void);    // 每帧（取 worker 结果、更新界面）
+    void (*destroy)(void); // 页面关闭前
+} lios_page_hooks_t;
+
+void lios_page_set_hooks(const lios_page_hooks_t *hooks);
+
+// 文件管理器页面（src/lios/files.cpp）
+void page_files_create(lv_obj_t *parent);
 
 void lios_desktop_create(void);   // UI 线程首次调用（已持锁）
 void lios_desktop_tick(void);     // 每帧调用（已持锁）：返回键 + 电源长按
