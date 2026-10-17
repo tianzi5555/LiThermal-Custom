@@ -461,6 +461,8 @@ static void card_btn_cb(lv_event_t *e)
 
 static void card_close(void)
 {
+    s_sh_card = NULL;
+    s_sh_label = NULL;
     s_kb = NULL;
     if (s_card != NULL && lv_obj_is_valid(s_card))
         lv_obj_del(s_card);
