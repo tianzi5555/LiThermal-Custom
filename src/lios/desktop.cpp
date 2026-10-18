@@ -465,23 +465,32 @@ static void plug_send(int key, int event)
 
 static void plugin_forward(bool menu, bool rec)
 {
-    // 滚轮 -> 左右（每转一格发一次「按下+抬起」；插件里也可以自己看 hold 状态）
-    int d = lios_enc_take();
-    for (int i = 0; i < 8 && d > 0; i++, d--)
+    if (!s_page_wheel_focus)
     {
-        plug_send(LIOS_KEY_RIGHT, LIOS_EV_PRESS);
-        plug_send(LIOS_KEY_RIGHT, LIOS_EV_RELEASE);
+        // 滚轮 -> 左右（每转一格发一次「按下+抬起」；插件里也可以自己看 hold 状态）
+        int d = lios_enc_take();
+        for (int i = 0; i < 8 && d > 0; i++, d--)
+        {
+            plug_send(LIOS_KEY_RIGHT, LIOS_EV_PRESS);
+            plug_send(LIOS_KEY_RIGHT, LIOS_EV_RELEASE);
+        }
+        for (int i = 0; i < 8 && d < 0; i++, d++)
+        {
+            plug_send(LIOS_KEY_LEFT, LIOS_EV_PRESS);
+            plug_send(LIOS_KEY_LEFT, LIOS_EV_RELEASE);
+        }
+        bool down = lios_enc_pressed();
+        if (down != s_enc_prev)
+        {
+            plug_send(LIOS_KEY_ENTER, down ? LIOS_EV_PRESS : LIOS_EV_RELEASE);
+            s_enc_prev = down;
+        }
     }
-    for (int i = 0; i < 8 && d < 0; i++, d++)
+    else
     {
-        plug_send(LIOS_KEY_LEFT, LIOS_EV_PRESS);
-        plug_send(LIOS_KEY_LEFT, LIOS_EV_RELEASE);
-    }
-    bool down = lios_enc_pressed();
-    if (down != s_enc_prev)
-    {
-        plug_send(LIOS_KEY_ENTER, down ? LIOS_EV_PRESS : LIOS_EV_RELEASE);
-        s_enc_prev = down;
+        // 插件把滚轮交给 LVGL（例如终端要用的屏上键盘）：
+        // 这里【不消耗】encoder，留给 LVGL 的 indev；只同步一下按下状态防止切回时误发。
+        s_enc_prev = lios_enc_pressed();
     }
     if (rec)
     {
