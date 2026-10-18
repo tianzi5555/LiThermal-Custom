@@ -357,7 +357,7 @@ static void refresh_rows(void)
         for (int i = g_built; i < n; i++)
             build_row(i);
         g_built = n;
-        lv_obj_set_height(g_cont, n * ROW_H);
+        // 容器高度保持固定 CONT_H，子框 y 超出容器即可滚动（不能再把容器撑高，否则无超出无滚动）
     }
 
     char b[48];
