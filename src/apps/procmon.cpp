@@ -1,7 +1,8 @@
 // LiOS 进程管理器（插件）
-// 显示所有进程（/proc）：
-//   进程名（超出屏宽 1/3 就横向滚动）| 内存 | CPU% | 运行时间 | 权限上下文 | 父进程 | 可执行路径
-// worker 线程扫描 /proc（UI 回调不做 I/O）
+// 每行一个进程，套框显示：
+//   进程名称（超 1/3 屏宽自动横向滚动）| 内存 | CPU% | 运行时间 | 权限 | 父进程 | 可执行路径
+// 顶部标题行标注每列含义。滚轮逐行滚动（不是整页跳）。
+// worker 线程以 root 读 /proc（UI 回调不做 I/O）。
 
 #include "lios_app.h"
 #include "my_main.h"
@@ -13,32 +14,51 @@
 #include <string.h>
 #include <unistd.h>
 
-#define MAX_PROC 128
-#define ROWS 7
+#define MAX_PROC 256
+#define ROWS 6
+
+// 列布局（固定 x，右对齐式固定列）
+#define COL_NAME_X 2
+#define COL_MEM_X 88
+#define COL_CPU_X 134
+#define COL_TIME_X 168
+#define COL_PERM_X 214
+#define COL_PARENT_X 244
+#define COL_EXE_X 266
+#define COL_EXE_W (320 - COL_EXE_X - 2)
 
 typedef struct
 {
     int pid;
-    char name[32];     // 进程名
-    char full[64];     // 命令第一段
-    long rss_kb;       // VmRSS
-    int cpu;           // 占用 %
-    long etime_s;      // 运行秒数
-    char perm[24];     // 权限上下文 u:g
+    char name[24];      // 进程名（comm，短）
+    long rss_kb;
+    int cpu;            // 0-100，-1=未知
+    long etime_s;
+    long uid;
     int ppid;
-    char exe[96];      // 可执行路径
+    char parent[24];    // 父进程名
+    char exe[48];       // 可执行路径（截断）
+    int is_kthread;     // 内核线程（无内存/无 exe）
 } proc_t;
 
 static pthread_mutex_t s_mtx = PTHREAD_MUTEX_INITIALIZER;
 static proc_t s_procs[MAX_PROC];
 static int s_n = 0;
 static bool s_ready = false;
-static long s_prev_total[MAX_PROC]; // 简单 CPU 估算（每进程两次采样太贵，用进程 jiffies 差值）
-static long s_prev_ticks[MAX_PROC];
-static long s_total_ticks[MAX_PROC];
+
+// CPU 差值采样（按 pid 索引，够大）
+static long s_prev_ticks[4096];
+static long s_prev_systotal = 0;
 
 static lv_obj_t *g_root = NULL;
-static lv_obj_t *g_rows[ROWS] = {0};
+static lv_obj_t *g_rows[ROWS] = {0};      // 框容器
+static lv_obj_t *g_name[ROWS] = {0};
+static lv_obj_t *g_mem[ROWS] = {0};
+static lv_obj_t *g_cpu[ROWS] = {0};
+static lv_obj_t *g_time[ROWS] = {0};
+static lv_obj_t *g_perm[ROWS] = {0};
+static lv_obj_t *g_par[ROWS] = {0};
+static lv_obj_t *g_exe[ROWS] = {0};
 static lv_obj_t *g_hint = NULL;
 static lv_timer_t *g_timer = NULL;
 
@@ -54,9 +74,8 @@ static void read_file(const char *path, char *out, size_t n)
     size_t got = fread(out, 1, n - 1, f);
     out[got] = 0;
     fclose(f);
-    // 去尾换行
     size_t l = strlen(out);
-    while (l > 0 && (out[l - 1] == '\n' || out[l - 1] == ' '))
+    while (l > 0 && (out[l - 1] == '\n' || out[l - 1] == ' ' || out[l - 1] == '\t'))
         out[--l] = 0;
 }
 
@@ -68,175 +87,181 @@ static long field_l(const char *buf, const char *key)
     return atol(p + strlen(key));
 }
 
-static long read_ticks(int pid)
+// 解析 /proc/pid/stat：从 ")" 后第 N 个字段（1 基，第 1 个是 state）
+static long stat_field(int pid, int field)
 {
     char path[64];
     snprintf(path, sizeof(path), "/proc/%d/stat", pid);
+    char buf[1024];
     FILE *f = fopen(path, "r");
     if (f == NULL)
         return -1;
-    // 格式: pid (comm) state ... 从 ")" 后数第 14 个字段是 utime, 15 stime
-    char buf[512];
     size_t got = fread(buf, 1, sizeof(buf) - 1, f);
     buf[got] = 0;
     fclose(f);
     const char *cp = strrchr(buf, ')');
     if (cp == NULL)
         return -1;
-    cp += 2;
-    // state(3) ppid(4) pgrp(5) session(6) tty(7) tpgid(8) flags(9) minflt(10) cminflt(11) majflt(12) cmajflt(13) utime(14) stime(15)
-    long v[14] = {0};
-    int n = sscanf(cp, "%*s %*d %*d %*d %*d %*d %*d %*d %*d %*d %*d %ld %ld",
-                   &v[0], &v[1]);
-    if (n < 2)
-        return -1;
-    return v[0] + v[1];
+    cp += 2; // 跳过 ") "
+    // 用空格拆分：第 1 个 token = state(3)，第 2 = ppid(4)...
+    // field 相对：用户传的是"从 state 数第几个"
+    long v = -1;
+    const char *p = cp;
+    for (int i = 1; i <= field; i++)
+    {
+        while (*p == ' ')
+            p++;
+        const char *start = p;
+        while (*p && *p != ' ')
+            p++;
+        if (i == field)
+        {
+            char tmp[32];
+            size_t len = p - start;
+            if (len >= sizeof(tmp))
+                len = sizeof(tmp) - 1;
+            memcpy(tmp, start, len);
+            tmp[len] = 0;
+            v = atol(tmp);
+        }
+        if (*p == 0)
+            break;
+    }
+    return v;
 }
 
-static long total_system_ticks(void)
+static long system_ticks(void)
 {
     FILE *f = fopen("/proc/stat", "r");
     if (f == NULL)
         return 1;
-    long u, n, s, idl, io, ir, si;
-    if (fscanf(f, "cpu %ld %ld %ld %ld %ld %ld %ld", &u, &n, &s, &idl, &io, &ir, &si) < 4)
+    long u, n, s, idl;
+    if (fscanf(f, "cpu %ld %ld %ld %ld", &u, &n, &s, &idl) < 4)
     {
         fclose(f);
         return 1;
     }
     fclose(f);
-    return u + n + s + idl + io + ir + si;
+    return u + n + s + idl;
 }
 
 static void *scan_worker(void *)
 {
     for (;;)
     {
+        long sys_total = system_ticks();
+        long upt = 0;
+        FILE *uf = fopen("/proc/uptime", "r");
+        if (uf != NULL)
+        {
+            fscanf(uf, "%lf", &upt);
+            fclose(uf);
+        }
+
+        // 第一遍：pid -> name 映射（供父进程名查询）
+        static char pidname[4096][24];
+        DIR *d = opendir("/proc");
+        if (d == NULL)
+            break;
+        struct dirent *e;
+        while ((e = readdir(d)) != NULL)
+        {
+            if (e->d_name[0] < '0' || e->d_name[0] > '9')
+                continue;
+            int pid = atoi(e->d_name);
+            if (pid <= 0 || pid >= 4096)
+                continue;
+            char path[64];
+            snprintf(path, sizeof(path), "/proc/%d/comm", pid);
+            read_file(path, pidname[pid], sizeof(pidname[pid]));
+            if (pidname[pid][0] == 0)
+                snprintf(pidname[pid], sizeof(pidname[pid]), "%d", pid);
+        }
+
+        // 第二遍：收集详情
         proc_t tmp[MAX_PROC];
         int n = 0;
-        long sys_total = total_system_ticks();
-
-        DIR *d = opendir("/proc");
-        if (d != NULL)
+        rewinddir(d);
+        while ((e = readdir(d)) != NULL && n < MAX_PROC)
         {
-            struct dirent *e;
-            while ((e = readdir(d)) != NULL && n < MAX_PROC)
+            if (e->d_name[0] < '0' || e->d_name[0] > '9')
+                continue;
+            int pid = atoi(e->d_name);
+            if (pid <= 0)
+                continue;
+            proc_t *p = &tmp[n];
+            memset(p, 0, sizeof(*p));
+            p->pid = pid;
+            p->cpu = -1;
+
+            char path[128];
+            snprintf(path, sizeof(path), "/proc/%d/status", pid);
+            char st[1024];
+            read_file(path, st, sizeof(st));
+            char nm[64];
+            const char *np = strstr(st, "Name:");
+            if (np != NULL)
             {
-                if (e->d_name[0] < '0' || e->d_name[0] > '9')
-                    continue;
-                int pid = atoi(e->d_name);
-                if (pid <= 0)
-                    continue;
-                char path[128];
-                proc_t *p = &tmp[n];
+                sscanf(np + 5, " %63s", nm);
+                snprintf(p->name, sizeof(p->name), "%s", nm);
+            }
+            else
+                snprintf(p->name, sizeof(p->name), "?");
+            long ppid = field_l(st, "PPid:");
+            long uid = field_l(st, "Uid:");
+            long rss = field_l(st, "VmRSS:");
+            p->ppid = (int)ppid;
+            p->uid = uid > 0 ? uid : 0;
+            p->rss_kb = rss > 0 ? rss : -1; // 内核线程没有 VmRSS -> -1 显示 '-'
+            p->is_kthread = (rss < 0);
 
-                // 状态（名字/ppid/uid）
-                snprintf(path, sizeof(path), "/proc/%d/status", pid);
-                char st[512];
-                read_file(path, st, sizeof(st));
-                char nm[64];
-                const char *np = strstr(st, "Name:");
-                if (np != NULL)
-                {
-                    sscanf(np + 5, " %63s", nm);
-                    snprintf(p->name, sizeof(p->name), "%s", nm);
-                }
-                else
-                    snprintf(p->name, sizeof(p->name), "?");
-                long ppid = field_l(st, "PPid:");
-                long uid = field_l(st, "Uid:");
-                long rss = field_l(st, "VmRSS:");
-                p->ppid = (int)ppid;
-                p->rss_kb = rss > 0 ? rss : 0;
-                snprintf(p->perm, sizeof(p->perm), "u%ld", uid > 0 ? uid : 0);
+            // exe 路径
+            snprintf(path, sizeof(path), "/proc/%d/exe", pid);
+            char ex[96];
+            ssize_t r = readlink(path, ex, sizeof(ex) - 1);
+            if (r > 0)
+            {
+                ex[r] = 0;
+                snprintf(p->exe, sizeof(p->exe), "%s", ex);
+            }
+            else
+                snprintf(p->exe, sizeof(p->exe), ""); // 内核线程无 exe
 
-                // cmdline 第一段
-                snprintf(path, sizeof(path), "/proc/%d/cmdline", pid);
-                char cl[256];
-                read_file(path, cl, sizeof(cl));
-                snprintf(p->full, sizeof(p->full), "%s", cl[0] ? cl : p->name);
-
-                // exe 路径
-                snprintf(path, sizeof(path), "/proc/%d/exe", pid);
-                char ex[96];
-                ssize_t r = readlink(path, ex, sizeof(ex) - 1);
-                if (r > 0)
+            // 运行时间 + CPU ticks
+            long utime = stat_field(pid, 14);  // 从 state 数第14 = utime
+            long stime = stat_field(pid, 15);  // 第15 = stime
+            long starttime = stat_field(pid, 20); // 第20 = starttime(字段22)
+            if (utime >= 0 && stime >= 0)
+            {
+                long tk = utime + stime;
+                int idx = pid & 4095;
+                if (s_prev_ticks[idx] > 0 && sys_total > 0 && s_prev_systotal > 0)
                 {
-                    ex[r] = 0;
-                    snprintf(p->exe, sizeof(p->exe), "%s", ex);
-                }
-                else
-                    snprintf(p->exe, sizeof(p->exe), "-");
-
-                // 运行时间（HZ=100）
-                long et = field_l(st, "real_time:");
-                if (et < 0)
-                {
-                    // 从 /proc/uptime 和 starttime 算太麻烦，用 etime 替代
-                    et = 0;
-                }
-                // 用 /proc/pid/stat 的 starttime 不准，简化：读 /proc/uptime 与 stat starttime
-                snprintf(path, sizeof(path), "/proc/%d/stat", pid);
-                FILE *ff = fopen(path, "r");
-                if (ff != NULL)
-                {
-                    char b2[512];
-                    size_t g2 = fread(b2, 1, sizeof(b2) - 1, ff);
-                    b2[g2] = 0;
-                    fclose(ff);
-                    // starttime 是字段 22（从 ")" 后第 20 个数字）
-                    const char *cp = strrchr(b2, ')');
-                    if (cp != NULL)
-                    {
-                        long sv[20];
-                        int cnt = sscanf(cp + 2, "%*s %*d %*d %*d %*d %*d %*d %*d %*d %*d %*d %*d %*d %*d %*d %*d %*d %*d %*d %ld", &sv[0]);
-                        if (cnt == 1 && sv[0] > 0)
-                        {
-                            FILE *uf = fopen("/proc/uptime", "r");
-                            double up = 0;
-                            if (uf != NULL)
-                            {
-                                fscanf(uf, "%lf", &up);
-                                fclose(uf);
-                            }
-                            p->etime_s = (long)(up - sv[0] / 100.0);
-                            if (p->etime_s < 0)
-                                p->etime_s = 0;
-                        }
-                        else
-                            p->etime_s = 0;
-                    }
-                    else
-                        p->etime_s = 0;
-                }
-                else
-                    p->etime_s = 0;
-
-                // CPU%：进程 ticks 差值 / 系统 ticks 差值
-                long tk = read_ticks(pid);
-                p->cpu = 0;
-                if (tk >= 0 && s_prev_ticks[pid % MAX_PROC] > 0 && sys_total > 0)
-                {
-                    long dtk = tk - s_prev_ticks[pid % MAX_PROC];
-                    long dts = sys_total - s_total_ticks[pid % MAX_PROC];
-                    if (dtk > 0 && dts > 0)
+                    long dts = sys_total - s_prev_systotal;
+                    long dtk = tk - s_prev_ticks[idx];
+                    if (dts > 0 && dtk >= 0)
                         p->cpu = (int)(dtk * 100 / dts);
                 }
-                if (s_prev_ticks[pid % MAX_PROC] == 0)
-                {
-                    s_prev_ticks[pid % MAX_PROC] = tk;
-                    s_total_ticks[pid % MAX_PROC] = sys_total;
-                }
-                else
-                {
-                    s_prev_ticks[pid % MAX_PROC] = tk;
-                    s_total_ticks[pid % MAX_PROC] = sys_total;
-                }
-                p->pid = pid;
-                n++;
+                s_prev_ticks[idx] = tk;
             }
-            closedir(d);
+            if (starttime > 0 && upt > 0)
+            {
+                p->etime_s = (long)(upt - starttime / 100.0);
+                if (p->etime_s < 0)
+                    p->etime_s = 0;
+            }
+            else
+                p->etime_s = 0;
+
+            // 父进程名
+            if (p->ppid > 0 && p->ppid < 4096 && pidname[p->ppid][0])
+                snprintf(p->parent, sizeof(p->parent), "%s", pidname[p->ppid]);
+            else
+                snprintf(p->parent, sizeof(p->parent), "-");
+            n++;
         }
+        closedir(d);
+        s_prev_systotal = sys_total;
 
         pthread_mutex_lock(&s_mtx);
         memcpy(s_procs, tmp, sizeof(proc_t) * n);
@@ -246,6 +271,18 @@ static void *scan_worker(void *)
         usleep(1500 * 1000);
     }
     return NULL;
+}
+
+static lv_obj_t *mk_lbl(lv_obj_t *parent, int x, int y, int w, lv_align_t al)
+{
+    lv_obj_t *l = lv_label_create(parent);
+    lv_obj_set_pos(l, x, y);
+    lv_obj_set_style_text_font(l, &ui_font_cn12, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_color(l, lv_color_hex(0xE8EEF4), LV_PART_MAIN | LV_STATE_DEFAULT);
+    if (w > 0)
+        lv_obj_set_width(l, w);
+    lv_obj_set_style_text_align(l, al, LV_PART_MAIN | LV_STATE_DEFAULT);
+    return l;
 }
 
 static void refresh_rows(void)
@@ -267,39 +304,70 @@ static void refresh_rows(void)
     if (n == 0)
     {
         for (int i = 0; i < ROWS; i++)
-            if (g_rows[i] != NULL)
-                lv_label_set_text(g_rows[i], i == 0 ? "（无进程）" : "");
+            if (g_name[i] != NULL)
+                lv_label_set_text(g_name[i], "");
         return;
     }
 
-    int start = g_cur - g_cur % ROWS;
-    char b[ROWS][150];
+    int start = g_cur; // 逐行滚动
+    if (start > n - ROWS)
+        start = n - ROWS;
+    if (start < 0)
+        start = 0;
+
+    char b[ROWS][48];
     for (int i = 0; i < ROWS; i++)
     {
         int idx = start + i;
         if (idx >= n)
-            break;
+        {
+            if (g_name[i] != NULL)
+            {
+                lv_label_set_text(g_name[i], "");
+                lv_label_set_text(g_mem[i], "");
+                lv_label_set_text(g_cpu[i], "");
+                lv_label_set_text(g_time[i], "");
+                lv_label_set_text(g_perm[i], "");
+                lv_label_set_text(g_par[i], "");
+                lv_label_set_text(g_exe[i], "");
+                lv_obj_add_flag(g_rows[i], LV_OBJ_FLAG_HIDDEN);
+            }
+            continue;
+        }
+        lv_obj_clear_flag(g_rows[i], LV_OBJ_FLAG_HIDDEN);
         proc_t *p = &list[idx];
-        char et[24];
+        lv_label_set_text(g_name[i], p->name);
+        if (p->rss_kb < 0)
+            lv_label_set_text(g_mem[i], "-");
+        else if (p->rss_kb >= 1024)
+        {
+            snprintf(b[i], 48, "%.1fM", p->rss_kb / 1024.0);
+            lv_label_set_text(g_mem[i], b[i]);
+        }
+        else
+        {
+            snprintf(b[i], 48, "%ldK", p->rss_kb);
+            lv_label_set_text(g_mem[i], b[i]);
+        }
+        if (p->cpu < 0)
+            lv_label_set_text(g_cpu[i], "-");
+        else
+        {
+            snprintf(b[i], 48, "%d%%", p->cpu);
+            lv_label_set_text(g_cpu[i], b[i]);
+        }
         if (p->etime_s >= 3600)
-            snprintf(et, sizeof(et), "%ldh%ldm", p->etime_s / 3600, (p->etime_s % 3600) / 60);
+            snprintf(b[i], 48, "%ldh", p->etime_s / 3600);
         else if (p->etime_s >= 60)
-            snprintf(et, sizeof(et), "%ldm%lds", p->etime_s / 60, p->etime_s % 60);
+            snprintf(b[i], 48, "%ldm%lds", p->etime_s / 60, p->etime_s % 60);
         else
-            snprintf(et, sizeof(et), "%lds", p->etime_s);
-        char sz[16];
-        if (p->rss_kb >= 1024)
-            snprintf(sz, sizeof(sz), "%.1fM", p->rss_kb / 1024.0);
-        else
-            snprintf(sz, sizeof(sz), "%ldK", p->rss_kb);
-        // 进程名（超 1/3 屏宽即滚动——这里用"名字+省略号"表示，滚动靠 LVGL 无；简单用首 12 字符+…
-        // 布局：名字 | 内存 | CPU% | 时间 | 权限 | 父 | exe(截断)
-        snprintf(b[i], 150, "%s  %s  %d%%  %s  %s  P%d  %s",
-                 p->name, sz, p->cpu, et, p->perm, p->ppid, p->exe);
+            snprintf(b[i], 48, "%lds", p->etime_s);
+        lv_label_set_text(g_time[i], b[i]);
+        snprintf(b[i], 48, "u%ld", p->uid);
+        lv_label_set_text(g_perm[i], b[i]);
+        lv_label_set_text(g_par[i], p->parent);
+        lv_label_set_text(g_exe[i], p->exe[0] ? p->exe : "(内核)");
     }
-    for (int i = 0; i < ROWS; i++)
-        if (g_rows[i] != NULL)
-            lv_label_set_text(g_rows[i], i < ROWS && (start + i) < n ? b[i] : "");
 
     char h[80];
     snprintf(h, sizeof(h), "%d 个进程   滚轮上下   菜单返回", n);
@@ -328,7 +396,6 @@ static void tick_cb(lv_timer_t *t)
         pthread_mutex_unlock(&s_mtx);
         refresh_rows();
     }
-    // 每 1.5 秒自动刷新一次
     static uint32_t last = 0;
     uint32_t now = lv_tick_get();
     if (now - last > 1500)
@@ -347,13 +414,74 @@ extern "C" lv_obj_t *lios_app_create(lv_obj_t *parent)
     g_root = parent;
     g_cur = 0;
 
+    // 顶部标题行
+    lv_obj_t *h1 = lv_label_create(parent);
+    lv_obj_set_style_text_font(h1, &ui_font_cn12, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_color(h1, lv_color_hex(0x9AD7FF), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_label_set_text(h1, "进程名称");
+    lv_obj_set_pos(h1, COL_NAME_X, 2);
+    lv_obj_t *h2 = lv_label_create(parent);
+    lv_obj_set_style_text_font(h2, &ui_font_cn12, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_color(h2, lv_color_hex(0x9AD7FF), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_label_set_text(h2, "内存");
+    lv_obj_set_pos(h2, COL_MEM_X, 2);
+    lv_obj_t *h3 = lv_label_create(parent);
+    lv_obj_set_style_text_font(h3, &ui_font_cn12, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_color(h3, lv_color_hex(0x9AD7FF), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_label_set_text(h3, "CPU");
+    lv_obj_set_pos(h3, COL_CPU_X, 2);
+    lv_obj_t *h4 = lv_label_create(parent);
+    lv_obj_set_style_text_font(h4, &ui_font_cn12, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_color(h4, lv_color_hex(0x9AD7FF), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_label_set_text(h4, "时间");
+    lv_obj_set_pos(h4, COL_TIME_X, 2);
+    lv_obj_t *h5 = lv_label_create(parent);
+    lv_obj_set_style_text_font(h5, &ui_font_cn12, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_color(h5, lv_color_hex(0x9AD7FF), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_label_set_text(h5, "权限");
+    lv_obj_set_pos(h5, COL_PERM_X, 2);
+    lv_obj_t *h6 = lv_label_create(parent);
+    lv_obj_set_style_text_font(h6, &ui_font_cn12, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_color(h6, lv_color_hex(0x9AD7FF), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_label_set_text(h6, "父");
+    lv_obj_set_pos(h6, COL_PARENT_X, 2);
+    lv_obj_t *h7 = lv_label_create(parent);
+    lv_obj_set_style_text_font(h7, &ui_font_cn12, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_color(h7, lv_color_hex(0x9AD7FF), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_label_set_text(h7, "路径");
+    lv_obj_set_pos(h7, COL_EXE_X, 2);
+
+    // 数据行：每行一个框
     for (int i = 0; i < ROWS; i++)
     {
-        lv_obj_t *r = lv_label_create(parent);
-        lv_obj_set_style_text_font(r, &ui_font_cn12, LV_PART_MAIN | LV_STATE_DEFAULT);
-        lv_obj_set_style_text_color(r, lv_color_hex(0xE8EEF4), LV_PART_MAIN | LV_STATE_DEFAULT);
-        lv_obj_set_pos(r, 4, 6 + i * 22);
-        g_rows[i] = r;
+        int y = 18 + i * 32;
+        lv_obj_t *box = lv_obj_create(parent);
+        lv_obj_set_size(box, 316, 28);
+        lv_obj_set_pos(box, 2, y);
+        lv_obj_clear_flag(box, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_radius(box, 4, LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_bg_color(box, lv_color_hex(0x141E28), LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_bg_opa(box, LV_OPA_COVER, LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_border_width(box, 1, LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_border_color(box, lv_color_hex(0x2B3640), LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_pad_all(box, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+        g_rows[i] = box;
+
+        // 进程名：超宽横向滚动（LONG_SCROLL 自动循环滚动）
+        lv_obj_t *nm = lv_label_create(box);
+        lv_obj_set_pos(nm, 2, 7);
+        lv_obj_set_width(nm, COL_MEM_X - COL_NAME_X - 4);
+        lv_label_set_long_mode(nm, LV_LABEL_LONG_SCROLL);
+        lv_obj_set_style_text_font(nm, &ui_font_cn12, LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_text_color(nm, lv_color_white(), LV_PART_MAIN | LV_STATE_DEFAULT);
+        g_name[i] = nm;
+
+        g_mem[i] = mk_lbl(box, COL_MEM_X, 7, 44, LV_TEXT_ALIGN_LEFT);
+        g_cpu[i] = mk_lbl(box, COL_CPU_X, 7, 32, LV_TEXT_ALIGN_LEFT);
+        g_time[i] = mk_lbl(box, COL_TIME_X, 7, 44, LV_TEXT_ALIGN_LEFT);
+        g_perm[i] = mk_lbl(box, COL_PERM_X, 7, 28, LV_TEXT_ALIGN_LEFT);
+        g_par[i] = mk_lbl(box, COL_PARENT_X, 7, 20, LV_TEXT_ALIGN_LEFT);
+        g_exe[i] = mk_lbl(box, COL_EXE_X, 7, COL_EXE_W, LV_TEXT_ALIGN_LEFT);
     }
 
     g_hint = lv_label_create(parent);
@@ -384,7 +512,16 @@ extern "C" void lios_app_destroy(void)
     }
     g_root = NULL;
     for (int i = 0; i < ROWS; i++)
+    {
         g_rows[i] = NULL;
+        g_name[i] = NULL;
+        g_mem[i] = NULL;
+        g_cpu[i] = NULL;
+        g_time[i] = NULL;
+        g_perm[i] = NULL;
+        g_par[i] = NULL;
+        g_exe[i] = NULL;
+    }
     g_hint = NULL;
 }
 
