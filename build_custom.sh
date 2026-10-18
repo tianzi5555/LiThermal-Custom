@@ -46,7 +46,7 @@ fi
 
 # ---- 插件 .so（弹球 / 俄罗斯方块）：打进 UDISK/apps，部署时放到 /mnt/UDISK/apps/ ----
 mkdir -p "$GITHUB_WORKSPACE/UDISK/apps"
-for plug in ball tetris calc unitconv stopwatch sysmon logclean procmon; do
+for plug in ball tetris calc unitconv stopwatch sysmon logclean procmon terminal; do
     if [ -f "$ROOTPATH/build/$plug.so" ]; then
         cp "$ROOTPATH/build/$plug.so" "$GITHUB_WORKSPACE/UDISK/apps/"
     else
@@ -61,7 +61,7 @@ done
 NM="$ROOTPATH/toolchain-sunxi-musl/toolchain/bin/arm-openwrt-linux-nm"
 if [ -x "$NM" ]; then
     "$NM" -D --defined-only "$ROOTPATH/build/lios" | awk '{print $NF}' | sort -u > /tmp/lios_defined.txt
-    for plug in ball tetris calc unitconv stopwatch sysmon logclean procmon; do
+    for plug in ball tetris calc unitconv stopwatch sysmon logclean procmon terminal; do
         "$NM" -D --undefined-only "$ROOTPATH/build/$plug.so" | awk '{print $NF}' \
             | grep -E '^(lv_|ui_font_|lios_)' | sort -u > "/tmp/need_$plug.txt" || true
         MISSING=$(comm -23 "/tmp/need_$plug.txt" /tmp/lios_defined.txt || true)
