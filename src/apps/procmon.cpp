@@ -37,6 +37,7 @@ typedef struct
     int cpu;
     long etime_s;
     long uid;
+    int ppid;
     char parent[24];
     char exe[48];
     int is_kthread;
