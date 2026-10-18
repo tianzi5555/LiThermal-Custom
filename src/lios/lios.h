@@ -116,8 +116,12 @@ typedef struct
 
 void lios_page_set_hooks(const lios_page_hooks_t *hooks);
 
-// 页面运行期切换「滚轮给 LVGL 焦点」还是「页面自己收」（查看器要用）
-void lios_desktop_set_wheel_focus(bool on);
+// 页面运行期切换「滚轮给 LVGL 焦点」还是「页面自己收」（查看器/终端键盘要用）
+// 必须是 C 链接：插件 .so 通过 -rdynamic 解析（否则名字被 mangle 对不上，CI 自检会拦）
+extern "C"
+{
+    void lios_desktop_set_wheel_focus(bool on);
+}
 
 // 文件管理器页面（src/lios/files.cpp）
 void page_files_create(lv_obj_t *parent);
