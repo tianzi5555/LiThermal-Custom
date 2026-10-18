@@ -64,6 +64,8 @@ static int g_built = 0;
 static lv_obj_t *g_hint = NULL;
 static lv_timer_t *g_timer = NULL;
 
+static int g_sel = 0; // 选中项索引（滚轮控制它，不是滚画面）
+
 // 暂停确认弹窗
 static lv_obj_t *g_confirm = NULL;
 static lv_obj_t *g_opt[2] = {0};
@@ -384,18 +386,13 @@ static void refresh_rows(void)
 // 选中行 pid（容器可视区中间那行）
 static int selected_pid(void)
 {
-    int top = 0;
-    if (g_cont != NULL && lv_obj_is_valid(g_cont))
-        top = (int)(lv_obj_get_scroll_y(g_cont) / ROW_H);
     pthread_mutex_lock(&s_mtx);
     int n = s_n;
-    pthread_mutex_unlock(&s_mtx);
-    int idx = top + ((CONT_H / 2) / ROW_H);
+    int idx = g_sel;
     if (idx >= n)
         idx = n - 1;
     if (idx < 0)
         idx = 0;
-    pthread_mutex_lock(&s_mtx);
     int pid = (idx >= 0 && idx < n) ? s_procs[idx].pid : 0;
     pthread_mutex_unlock(&s_mtx);
     return pid;
@@ -405,15 +402,25 @@ static void update_selbar(void)
 {
     if (g_selbar == NULL || !lv_obj_is_valid(g_selbar))
         return;
-    int y = (CONT_H / 2) / ROW_H * ROW_H + 1;
-    lv_obj_set_pos(g_selbar, 0, y);
+    // 高亮条在内容坐标里跟着选中索引走（滚动时它跟着动）
+    lv_obj_set_pos(g_selbar, 0, g_sel * ROW_H + 1);
 }
 
-static void scroll_list(int dir)
+// 滚轮移动【选中项】（不是滚画面）：
+//   选中项在屏幕内逐行走；走到可见区边缘时画面才跟着滚（scroll_to_view）；
+//   到第一个再上滚 -> 跳最后一个；到最后一个再下滚 -> 跳第一个（循环）
+static void move_sel(int dir)
 {
-    if (g_cont == NULL || !lv_obj_is_valid(g_cont))
+    pthread_mutex_lock(&s_mtx);
+    int n = s_n;
+    pthread_mutex_unlock(&s_mtx);
+    if (n <= 0)
         return;
-    lv_obj_scroll_by_bounded(g_cont, 0, -dir * ROW_H, LV_ANIM_ON);
+    g_sel = (g_sel + dir + n) % n;
+    update_selbar();
+    if (g_cont != NULL && lv_obj_is_valid(g_cont) && g_box[g_sel] != NULL &&
+        lv_obj_is_valid(g_box[g_sel]))
+        lv_obj_scroll_to_view(g_box[g_sel], LV_ANIM_ON); // 确保选中行可见（已在视野内则不动）
 }
 
 // ---------------- 暂停确认弹窗
@@ -525,7 +532,7 @@ static void tick_cb(lv_timer_t *t)
             update_confirm_ui();
         }
         else
-            scroll_list(-1);
+            move_sel(-1);
     }
     if (g_right > 0)
     {
@@ -536,7 +543,7 @@ static void tick_cb(lv_timer_t *t)
             update_confirm_ui();
         }
         else
-            scroll_list(1);
+            move_sel(1);
     }
     if (g_rec > 0)
     {
@@ -568,6 +575,7 @@ extern "C" lv_obj_t *lios_app_create(lv_obj_t *parent)
 {
     g_root = parent;
     g_built = 0;
+    g_sel = 0;
     for (int i = 0; i < MAX_PROC; i++)
     {
         g_box[i] = NULL;
@@ -599,7 +607,7 @@ extern "C" lv_obj_t *lios_app_create(lv_obj_t *parent)
     // 高亮条（覆盖在容器中间行上，随容器一起滚动 -> 指示选中）
     g_selbar = lv_obj_create(g_cont);
     lv_obj_set_size(g_selbar, 314, ROW_H - 4);
-    lv_obj_set_pos(g_selbar, 0, (CONT_H / 2) / ROW_H * ROW_H + 1);
+    lv_obj_set_pos(g_selbar, 0, g_sel * ROW_H + 1);
     lv_obj_clear_flag(g_selbar, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_opa(g_selbar, LV_OPA_30, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_border_width(g_selbar, 2, LV_PART_MAIN | LV_STATE_DEFAULT);
@@ -639,6 +647,7 @@ extern "C" void lios_app_destroy(void)
     g_selbar = NULL;
     g_hint = NULL;
     g_built = 0;
+    g_sel = 0;
     for (int i = 0; i < MAX_PROC; i++)
     {
         g_box[i] = NULL;
