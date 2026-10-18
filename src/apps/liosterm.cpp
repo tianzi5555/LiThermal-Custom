@@ -33,7 +33,7 @@ extern "C"
 }
 
 #define OUT_MAX 12000
-#define OUT_ROWS 4
+#define OUT_ROWS 3
 #define CMD_MAX 160
 
 static pthread_mutex_t s_mtx = PTHREAD_MUTEX_INITIALIZER;
@@ -308,12 +308,12 @@ extern "C" lv_obj_t *lios_app_create(lv_obj_t *parent)
         lv_obj_t *r = lv_label_create(parent);
         lv_obj_set_style_text_font(r, &ui_font_cn12, LV_PART_MAIN | LV_STATE_DEFAULT);
         lv_obj_set_style_text_color(r, lv_color_hex(0xD8E2EA), LV_PART_MAIN | LV_STATE_DEFAULT);
-        lv_obj_set_pos(r, 4, 32 + i * 15);
+        lv_obj_set_pos(r, 4, 32 + i * 14);
         g_out[i] = r;
     }
 
     // 底部：屏幕键盘（自由输入）
-    g_kb = lios_kb_create(parent, 96, 320, "执行", kb_action, NULL);
+    g_kb = lios_kb_create(parent, 77, 320, "执行", kb_action, NULL);
     if (g_kb != NULL)
     {
         lios_kb_set_text(g_kb, "");
@@ -321,9 +321,10 @@ extern "C" lv_obj_t *lios_app_create(lv_obj_t *parent)
         lios_kb_focus(g_kb);
     }
 
+    // 初始无输出（没有提示/示例）
     pthread_mutex_lock(&s_mtx);
-    snprintf(s_out, sizeof(s_out), "输入命令后按键盘上的「执行」。\n例: ls /  cat /proc/cpuinfo  df -h  su\n");
-    s_out_len = strlen(s_out);
+    s_out[0] = 0;
+    s_out_len = 0;
     pthread_mutex_unlock(&s_mtx);
 
     if (g_timer == NULL)

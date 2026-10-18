@@ -16,7 +16,7 @@
 #define KB_KEY_H 22
 #define KB_PITCH_X 30
 #define KB_PITCH_Y 24
-#define KB_INPUT_H 28
+#define KB_INPUT_H 19   // 输入框高度缩 1/3（上边不变，下面朝键盘收）
 
 // a-z / 0-9 / . _ - /  = 26 + 10 + 5 = 41 个字符，取前 40 个（最后一格放 "/"）
 static const char *const KB_CHARS[KB_N] = {
@@ -99,6 +99,13 @@ static void kb_clear_cb(lv_event_t *e)
         lv_textarea_set_text(kb->ta, "");
 }
 
+static void kb_space_cb(lv_event_t *e)
+{
+    kb_t *kb = (kb_t *)lv_event_get_user_data(e);
+    if (kb != NULL && kb->ta != NULL)
+        lv_textarea_add_text(kb->ta, " ");
+}
+
 static void kb_action_cb(lv_event_t *e)
 {
     kb_t *kb = (kb_t *)lv_event_get_user_data(e);
@@ -118,7 +125,7 @@ lv_obj_t *lios_kb_create(lv_obj_t *parent, lv_coord_t y, lv_coord_t w,
     kb->user = user;
 
     kb->root = lv_obj_create(parent);
-    lv_obj_set_size(kb->root, w, KB_INPUT_H + KB_ROWS * KB_PITCH_Y + KB_PITCH_Y);
+    lv_obj_set_size(kb->root, w, KB_INPUT_H + KB_ROWS * KB_PITCH_Y + KB_PITCH_Y + KB_PITCH_Y); // 多一行放空格键
     lv_obj_set_pos(kb->root, 0, y);
     lv_obj_clear_flag(kb->root, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_opa(kb->root, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
@@ -158,6 +165,11 @@ lv_obj_t *lios_kb_create(lv_obj_t *parent, lv_coord_t y, lv_coord_t w,
     lv_obj_add_event_cb(b, kb_clear_cb, LV_EVENT_CLICKED, kb);
     b = make_key(kb->root, action_label ? action_label : "确定", 188, fy, 92, KB_KEY_H, true);
     lv_obj_add_event_cb(b, kb_action_cb, LV_EVENT_CLICKED, kb);
+
+    // 底部空格键（整行宽）：往输入框里加一个空格
+    lv_coord_t sy = fy + KB_PITCH_Y;
+    lv_obj_t *sp = make_key(kb->root, "空格", 0, sy, w, KB_KEY_H, false);
+    lv_obj_add_event_cb(sp, kb_space_cb, LV_EVENT_CLICKED, kb);
 
     return kb->root;
 }
