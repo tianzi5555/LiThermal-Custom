@@ -79,7 +79,7 @@ static lv_timer_t *g_timer = NULL;
 static int g_left = 0, g_right = 0, g_enter = 0, g_rec = 0;
 static bool g_enter_down = false;
 static uint32_t g_enter_ms = 0;
-static bool g_enter_long = false;
+static int g_enter_long = 0; // 长按确认的待处理次数（不能是 bool：要 ++/--）
 
 // ---------------------------------------------------------------- 小工具（worker 线程用）
 static int run_sh(const char *cmd)
