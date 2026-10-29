@@ -115,55 +115,127 @@ static int find_ecm_ifname(char *out, size_t n)
     return found;
 }
 
-// 启用 ECM gadget（给已有的 g1 追加 ecm.usb0，端点紧张所以摘掉 adb）
+// 读一个小文件（worker 线程用）
+static void read_small(const char *path, char *out, size_t n)
+{
+    out[0] = 0;
+    FILE *f = fopen(path, "r");
+    if (f == NULL)
+        return;
+    size_t got = fread(out, 1, n - 1, f);
+    out[got] = 0;
+    fclose(f);
+    size_t l = strlen(out);
+    while (l > 0 && (out[l - 1] == '\n' || out[l - 1] == '\r' || out[l - 1] == ' '))
+        out[--l] = 0;
+}
+
+// 启用 ECM gadget —— 完全照搬在这台相机上验证过的 usbnet_boot.sh 顺序：
+//   等 gadget 就绪 → 解绑 → sleep 1 → 摘 MTP + ADB（T113 的 UDC 端点很少，
+//   ECM 要独占；MTP 占 3 个端点、adb 占 2 个，不摘会导致主机 SET_INTERFACE 失败，
+//   BW21 那边表现为 "ECM alt setting err"，网卡永远起不来）
+//   → 建 function → 链接进 c.1 → 绑定 UDC → sleep 1 → 验证绑定成功
+// 每步结果写 /tmp/bw21_ecm.stat 并显示在屏幕上（ECM 模式下没有 adb，只能靠屏幕看）。
 static void enable_ecm_gadget(void)
 {
     pthread_mutex_lock(&s_mtx);
     snprintf(s_status, sizeof(s_status), "正在配置 USB 网卡…");
+    snprintf(s_detail, sizeof(s_detail), "");
     pthread_mutex_unlock(&s_mtx);
 
-    run_sh("G=/sys/kernel/config/usb_gadget/g1; "
-           "U=$(cat $G/UDC 2>/dev/null); "
-           "echo \"\" > $G/UDC 2>/dev/null; "
-           "mkdir -p $G/functions/ecm.usb0 2>/dev/null; "
-           "echo 02:00:00:00:ec:01 > $G/functions/ecm.usb0/dev_addr 2>/dev/null; "
-           "echo 02:00:00:00:ec:02 > $G/functions/ecm.usb0/host_addr 2>/dev/null; "
-           "echo usbnet_ecm > $G/functions/ecm.usb0/ifname 2>/dev/null; "
-           "rm -f $G/configs/c.1/ffs.adb 2>/dev/null; "
-           "ln -s $G/functions/ecm.usb0 $G/configs/c.1/ 2>/dev/null; "
-           "echo \"$U\" > $G/UDC 2>/dev/null; "
-           "sleep 1");
+    run_sh("S=/tmp/bw21_ecm.stat; G=/sys/kernel/config/usb_gadget/g1; "
+           "echo start > $S; "
+           "i=0; udc=''; "
+           "while [ $i -lt 20 ]; do "
+           "  if [ -e \"$G/configs/c.1/ffs.adb\" ]; then udc=$(cat \"$G/UDC\" 2>/dev/null); fi; "
+           "  if [ -n \"$udc\" ]; then break; fi; "
+           "  sleep 1; i=$((i+1)); "
+           "done; "
+           "if [ -z \"$udc\" ]; then echo 'fail:gadget未就绪(UDC为空)' > $S; exit 1; fi; "
+           "echo \"udc=$udc\" > $S; "
+           "echo '' > \"$G/UDC\" 2>/dev/null; "
+           "sleep 1; "
+           "if [ -e \"$G/configs/c.1/ffs.mtp\" ]; then rm -f \"$G/configs/c.1/ffs.mtp\"; fi; "
+           "if [ -e \"$G/configs/c.1/ffs.adb\" ]; then rm -f \"$G/configs/c.1/ffs.adb\"; fi; "
+           "if [ ! -d \"$G/functions/ecm.usb0\" ]; then mkdir \"$G/functions/ecm.usb0\"; fi; "
+           "if [ ! -d \"$G/functions/ecm.usb0\" ]; then echo 'fail:建ecm功能失败' > $S; exit 1; fi; "
+           "echo 02:00:00:00:ec:01 > \"$G/functions/ecm.usb0/dev_addr\" 2>/dev/null; "
+           "echo 02:00:00:00:ec:02 > \"$G/functions/ecm.usb0/host_addr\" 2>/dev/null; "
+           "echo usbnet_ecm > \"$G/functions/ecm.usb0/ifname\" 2>/dev/null; "
+           "if [ ! -e \"$G/configs/c.1/ecm.usb0\" ]; then "
+           "  ln -s \"$G/functions/ecm.usb0\" \"$G/configs/c.1/ecm.usb0\" 2>/dev/null; "
+           "fi; "
+           "if [ ! -e \"$G/configs/c.1/ecm.usb0\" ]; then echo 'fail:链接进c.1失败(端点不足?)' > $S; exit 1; fi; "
+           "echo \"$udc\" > \"$G/UDC\" 2>/dev/null; "
+           "sleep 1; "
+           "if [ -z \"$(cat \"$G/UDC\" 2>/dev/null)\" ]; then echo 'fail:绑定UDC失败' > $S; exit 1; fi; "
+           "echo ok > $S");
 
-    char ifn[32] = "usbnet_ecm";
-    char tmp[32];
-    if (find_ecm_ifname(tmp, sizeof(tmp)) == 0)
-        snprintf(ifn, sizeof(ifn), "%s", tmp);
+    char st[80];
+    read_small("/tmp/bw21_ecm.stat", st, sizeof(st));
+    lios_log("bw21cam: gadget 配置结果 = %s", st);
+
+    // 等网卡出现（主机枚举要时间），最多 20 秒
+    char ifn[32] = "";
+    for (int i = 0; i < 20; i++)
+    {
+        if (find_ecm_ifname(ifn, sizeof(ifn)) == 0)
+            break;
+        pthread_mutex_lock(&s_mtx);
+        snprintf(s_status, sizeof(s_status), "等网卡出现… %d/20", i + 1);
+        pthread_mutex_unlock(&s_mtx);
+        sleep(1);
+    }
+
+    if (ifn[0] == 0)
+    {
+        pthread_mutex_lock(&s_mtx);
+        snprintf(s_status, sizeof(s_status), "USB 网卡未启用");
+        snprintf(s_detail, sizeof(s_detail), "%s",
+                 strncmp(st, "ok", 2) == 0 ? "已绑定但网卡没出现:查线/VBUS"
+                                          : (st[0] ? st : "配置失败"));
+        pthread_mutex_unlock(&s_mtx);
+        return;
+    }
 
     char cmd[192];
     snprintf(cmd, sizeof(cmd), "ifconfig %s " CAM_IP " netmask " CAM_MASK " up", ifn);
     run_sh(cmd);
 
     pthread_mutex_lock(&s_mtx);
-    snprintf(s_detail, sizeof(s_detail), "网卡 %s = " CAM_IP, ifn);
+    snprintf(s_status, sizeof(s_status), "网卡已就绪，连接中…");
+    snprintf(s_detail, sizeof(s_detail), "%s = " CAM_IP, ifn);
     pthread_mutex_unlock(&s_mtx);
     lios_log("bw21cam: ECM 网卡就绪 %s", ifn);
 }
 
-// 恢复 adb 模式（摘掉 ecm，重新挂回 ffs.adb；不行就重启）
+// 恢复 adb 模式（摘掉 ecm，挂回 ffs.adb + ffs.mtp；configfs 是内存态，重启也能复原）
 static void restore_adb(void)
 {
     pthread_mutex_lock(&s_mtx);
     snprintf(s_status, sizeof(s_status), "正在恢复 adb…");
     pthread_mutex_unlock(&s_mtx);
-    run_sh("G=/sys/kernel/config/usb_gadget/g1; "
-           "U=$(cat $G/UDC 2>/dev/null); "
-           "echo \"\" > $G/UDC 2>/dev/null; "
-           "rm -f $G/configs/c.1/ecm.usb0 2>/dev/null; "
-           "ln -s $G/functions/ffs.adb $G/configs/c.1/ 2>/dev/null; "
-           "echo \"$U\" > $G/UDC 2>/dev/null");
+    run_sh("S=/tmp/bw21_ecm.stat; G=/sys/kernel/config/usb_gadget/g1; "
+           "udc=$(cat \"$G/UDC\" 2>/dev/null); "
+           "if [ -z \"$udc\" ]; then udc=$(ls /sys/class/udc 2>/dev/null | head -1); fi; "
+           "echo '' > \"$G/UDC\" 2>/dev/null; "
+           "sleep 1; "
+           "rm -f \"$G/configs/c.1/ecm.usb0\" 2>/dev/null; "
+           "if [ -d \"$G/functions/ffs.adb\" ] && [ ! -e \"$G/configs/c.1/ffs.adb\" ]; then "
+           "  ln -s \"$G/functions/ffs.adb\" \"$G/configs/c.1/ffs.adb\" 2>/dev/null; "
+           "fi; "
+           "if [ -d \"$G/functions/ffs.mtp\" ] && [ ! -e \"$G/configs/c.1/ffs.mtp\" ]; then "
+           "  ln -s \"$G/functions/ffs.mtp\" \"$G/configs/c.1/ffs.mtp\" 2>/dev/null; "
+           "fi; "
+           "echo \"$udc\" > \"$G/UDC\" 2>/dev/null; "
+           "sleep 1; "
+           "if [ -n \"$(cat \"$G/UDC\" 2>/dev/null)\" ]; then echo restored > $S; else echo 'fail:恢复绑定失败' > $S; fi");
+    char st[64];
+    read_small("/tmp/bw21_ecm.stat", st, sizeof(st));
     pthread_mutex_lock(&s_mtx);
     snprintf(s_status, sizeof(s_status), "已尝试恢复 adb");
-    snprintf(s_detail, sizeof(s_detail), "若电脑仍看不到设备，请重启相机");
+    snprintf(s_detail, sizeof(s_detail), "%s",
+             strncmp(st, "restored", 8) == 0 ? "电脑看不到设备就重启相机" : st);
     pthread_mutex_unlock(&s_mtx);
 }
 
