@@ -35,6 +35,7 @@
 #include "semphr.h"
 
 /* MMF2 视频 */
+#include "mmf2_link.h"
 #include "mmf2_module.h"
 #include "mmf2_siso.h"
 #include "module_video.h"
@@ -407,11 +408,13 @@ static void video_task(void *param)
 {
 	(void)param;
 
-	VS_LOG("sensor: %s native %dx%d@%dfps",
-		   sensor_params[USE_SENSOR].sensor_name,
-		   sensor_params[USE_SENSOR].sensor_width,
-		   sensor_params[USE_SENSOR].sensor_height,
-		   sensor_params[USE_SENSOR].sensor_fps);
+	VS_LOG("sensor #%d native %dx%d@%dfps；本固件按 %dx%d@%dfps 出 JPEG",
+		   (int)USE_SENSOR,
+		   (int)sensor_params[USE_SENSOR].sensor_width,
+		   (int)sensor_params[USE_SENSOR].sensor_height,
+		   (int)sensor_params[USE_SENSOR].sensor_fps,
+		   (int)video_v1_params.width, (int)video_v1_params.height,
+		   (int)video_v1_params.fps);
 
 	int voe_heap_size = video_voe_presetting(1, video_v1_params.width, video_v1_params.height,
 	                                             VS_BPS, 0,
@@ -448,8 +451,9 @@ static void video_task(void *param)
 	siso_start(siso_video_vs);
 
 	mm_module_ctrl(video_v1_ctx, CMD_VIDEO_APPLY, 0);
-	VS_LOG("视频链路已启动：JPEG %dx%d@%dfps → TCP :%d",
-		   video_v1_params.width, video_v1_params.height, video_v1_params.fps, VS_PORT);
+	VS_LOG("视频链路已启动：JPEG %dx%d@%dfps -> TCP :%d",
+		   (int)video_v1_params.width, (int)video_v1_params.height,
+		   (int)video_v1_params.fps, (int)VS_PORT);
 
 	vTaskDelete(NULL);
 }
