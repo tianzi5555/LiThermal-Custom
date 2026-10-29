@@ -286,6 +286,20 @@ static bool have_ecm_iface(void)
     return find_ecm_ifname(tmp, sizeof(tmp)) == 0;
 }
 
+// 链路诊断：把「网卡真实状态 + 能不能 ping 通 BW21」写成一行，显示到屏幕上。
+// ECM 模式下 adb 已经断了，只能靠屏幕看，所以这一行必须够用。
+static void link_diag(void)
+{
+    run_sh("n=$(cat /tmp/bw21_ifname 2>/dev/null); "
+           "if [ -z \"$n\" ]; then echo '无网卡' > /tmp/bw21_diag.txt; exit 0; fi; "
+           "o=$(ifconfig \"$n\" 2>&1); "
+           "ip=$(echo \"$o\" | grep -o 'inet addr:[0-9.]*' | head -1 | cut -d: -f2); "
+           "case \"$o\" in *UP*) u=UP ;; *) u=DOWN ;; esac; "
+           "case \"$o\" in *RUNNING*) r=RUN ;; *) r=NOCARRIER ;; esac; "
+           "p=$(ping -c 2 -W 1 " BW21_IP " 2>&1 | grep -o '[0-9]*% packet loss' | head -1); "
+           "echo \"$n $u/$r ${ip:-无IP} ping:${p:-失败}\" > /tmp/bw21_diag.txt");
+}
+
 // ---------------------------------------------------------------- 收流 + 解码
 static bool read_all(int fd, uint8_t *buf, size_t n)
 {
@@ -356,20 +370,19 @@ static void stream_loop(void)
         {
             close(fd);
             fail_cnt++;
+            link_diag(); // 把网卡真实状态 + ping 结果写到 /tmp/bw21_diag.txt
+            char diag[96];
+            read_small("/tmp/bw21_diag.txt", diag, sizeof(diag));
             pthread_mutex_lock(&s_mtx);
             if (!have_ecm_iface())
             {
                 snprintf(s_status, sizeof(s_status), "USB 网卡未启用");
                 snprintf(s_detail, sizeof(s_detail), "按确认键启用（会断开 adb）");
             }
-            else if (fail_cnt == 1)
-            {
-                snprintf(s_status, sizeof(s_status), "连不上 BW21");
-                snprintf(s_detail, sizeof(s_detail), "检查双C线/BW21供电(VBUS)/固件");
-            }
             else
             {
-                snprintf(s_status, sizeof(s_status), "重试中… (%d)", fail_cnt);
+                snprintf(s_status, sizeof(s_status), "连不上 BW21 (%d)", fail_cnt);
+                snprintf(s_detail, sizeof(s_detail), "%s", diag[0] ? diag : "诊断无输出");
             }
             pthread_mutex_unlock(&s_mtx);
             usleep(2000 * 1000);

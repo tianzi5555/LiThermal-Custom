@@ -147,9 +147,18 @@ static int cdc_ecm_cb_detach(void)
 	return HAL_OK;
 }
 
+static u32 s_ecm_rx_pkts = 0, s_ecm_rx_bytes = 0;
+static u32 s_ecm_tx_pkts = 0, s_ecm_tx_bytes = 0;
+
 static int cdc_ecm_cb_bulk_receive(u8 *buf, u32 len)
 {
 	if (len > 0) {
+		s_ecm_rx_pkts++;
+		s_ecm_rx_bytes += len;
+		if (s_ecm_rx_pkts <= 12 || (s_ecm_rx_pkts % 50) == 0) {
+			VS_LOG("ECM RX #%lu len=%lu total=%lu", (unsigned long)s_ecm_rx_pkts,
+			       (unsigned long)len, (unsigned long)s_ecm_rx_bytes);
+		}
 		usbh_ecm_rx_buf = buf;
 		ethernetif_mii_recv(&xnetif[ETHERNET_IDX], (int)len);
 	}
@@ -214,6 +223,12 @@ s8 rltk_mii_send(struct eth_drv_sg *sg_list, int sg_len, int total_len)
 		pdata += sg_list->len;
 	}
 	ret = usbh_cdc_ecm_send_data(usbh_ecm_tx_buf, (u32)total_len, 1);
+	s_ecm_tx_pkts++;
+	s_ecm_tx_bytes += (u32)total_len;
+	if (s_ecm_tx_pkts <= 12 || (s_ecm_tx_pkts % 50) == 0) {
+		VS_LOG("ECM TX #%lu len=%d ret=%d total=%lu", (unsigned long)s_ecm_tx_pkts,
+		       total_len, (int)ret, (unsigned long)s_ecm_tx_bytes);
+	}
 	return (ret == HAL_OK) ? 0 : -1;
 }
 
@@ -528,12 +543,31 @@ static void main_task(void *param)
 
 	/* 静态 IP：BW21 = 192.168.77.1，相机 = 192.168.77.2（必须 htonl 成网络序） */
 	LwIP_SetIP(ETHERNET_IDX, htonl(VS_IP_HOST), htonl(VS_MASK_HOST), htonl(VS_IP_HOST));
+
+	/* 显式给 ECM 网口设 MAC：官方 usbh_cdc_ecm_new 例程也是手动 memcpy 的。
+	 * 若 hwaddr 是全 0，ARP 应答的源 MAC 无效，相机会把包丢掉 → TCP 永远连不上。
+	 * 用和驱动兜底相同的本地管理地址 02:1f:3a:00:00:07。 */
+	{
+		static const u8 vs_mac[6] = { 0x02, 0x1f, 0x3a, 0x00, 0x00, 0x07 };
+		memcpy(xnetif[ETHERNET_IDX].hwaddr, vs_mac, 6);
+		xnetif[ETHERNET_IDX].hwaddr_len = 6;
+	}
+
 	netif_set_link_up(&xnetif[ETHERNET_IDX]);
 	netif_set_up(&xnetif[ETHERNET_IDX]);
 	netif_set_default(&xnetif[ETHERNET_IDX]);
 	s_net_ready = 1;
-	VS_LOG("网络就绪：ECM 口 = 192.168.77.1/24（相机侧应为 192.168.77.2）");
-	VS_LOG("提示：WiFi 口若也拿到了 192.168.77.x 会与本链路冲突，请把路由器网段避开 77");
+	VS_LOG("网络就绪：ECM 口 = %s/24（相机侧应为 192.168.77.2）",
+	       ip4addr_ntoa(netif_ip4_addr(&xnetif[ETHERNET_IDX])));
+	VS_LOG("netif %c%c%d flags=0x%02x link=%d hw=%02x:%02x:%02x:%02x:%02x:%02x mtu=%d",
+	       xnetif[ETHERNET_IDX].name[0], xnetif[ETHERNET_IDX].name[1],
+	       (int)xnetif[ETHERNET_IDX].num, (int)xnetif[ETHERNET_IDX].flags,
+	       netif_is_link_up(&xnetif[ETHERNET_IDX]) ? 1 : 0,
+	       xnetif[ETHERNET_IDX].hwaddr[0], xnetif[ETHERNET_IDX].hwaddr[1],
+	       xnetif[ETHERNET_IDX].hwaddr[2], xnetif[ETHERNET_IDX].hwaddr[3],
+	       xnetif[ETHERNET_IDX].hwaddr[4], xnetif[ETHERNET_IDX].hwaddr[5],
+	       (int)xnetif[ETHERNET_IDX].mtu);
+	VS_LOG("提示：WiFi 口若也拿到 192.168.77.x 会与本链路冲突，请把路由器网段避开 77");
 
 	s_fd_mtx = xSemaphoreCreateMutex();
 
