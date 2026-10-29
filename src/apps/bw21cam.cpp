@@ -36,9 +36,12 @@
 extern "C" void lios_log(const char *fmt, ...);
 
 // ---------------------------------------------------------------- 配置
-#define BW21_IP "192.168.2.250"
+// 链路地址：必须和 BW21 固件 li_video_stream.c 里的 VS_IP_HOST 一致。
+// 用独立的 192.168.77.x —— BW21 开机还会连家里 WiFi，若 ECM 口和 WiFi 同网段，
+// lwIP 会按 netif_list 顺序把发给相机的包从 WiFi 口送出去（本方案不打 lwIP 补丁）。
+#define BW21_IP "192.168.77.1"
 #define BW21_PORT 5555
-#define CAM_IP "192.168.2.231"
+#define CAM_IP "192.168.77.2"
 #define CAM_MASK "255.255.255.0"
 #define VW 320 // 显示缓冲宽
 #define VH 240 // 显示缓冲高

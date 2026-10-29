@@ -51,9 +51,17 @@
 extern struct netif xnetif[NET_IF_NUM];
 #define ETHERNET_IDX (NET_IF_NUM - 1)
 
-#define VS_IP_NBO   0xC0A802FAu   /* 192.168.2.250（BW21 侧） */
-#define VS_MASK_NBO 0xFFFFFF00u   /* 255.255.255.0           */
-#define VS_PORT     5555
+/* 链路地址（主机序；下面用 htonl 转成网络序再交给 lwIP —— 漏掉 htonl 会变成 250.2.168.192）
+ *
+ * 为什么用 192.168.77.x 而不是 192.168.2.x：
+ *   BW21 开机会连家里 WiFi（实测拿到 192.168.2.138）。lwIP 的 netif_route() 按
+ *   netif_list 顺序返回【第一个】同网段且 up 的接口，WiFi(索引 0) 比 ECM 先注册，
+ *   所以 ECM 若也落在 192.168.2.0/24，发给相机的包会从 WiFi 口出去 → 画面永远到不了。
+ *   网关固件是靠「代理 ARP + 主机路由」那套 lwIP 补丁解决的；本固件不打任何补丁，
+ *   因此直接换一个不会和家里网段相撞的独立网段。 */
+#define VS_IP_HOST   0xC0A84D01u /* 192.168.77.1（BW21 侧） */
+#define VS_MASK_HOST 0xFFFFFF00u /* 255.255.255.0          */
+#define VS_PORT      5555
 
 /* 视频：默认 VGA@30（相机屏 320×240 足够）；想要更清晰改 VIDEO_HD / VIDEO_FHD */
 #define VS_RESOLUTION VIDEO_VGA
@@ -476,13 +484,14 @@ static void main_task(void *param)
 		return;
 	}
 
-	/* 静态 IP：BW21 = 192.168.2.250，相机 = 192.168.2.231 */
-	LwIP_SetIP(ETHERNET_IDX, VS_IP_NBO, VS_MASK_NBO, VS_IP_NBO);
+	/* 静态 IP：BW21 = 192.168.77.1，相机 = 192.168.77.2（必须 htonl 成网络序） */
+	LwIP_SetIP(ETHERNET_IDX, htonl(VS_IP_HOST), htonl(VS_MASK_HOST), htonl(VS_IP_HOST));
 	netif_set_link_up(&xnetif[ETHERNET_IDX]);
 	netif_set_up(&xnetif[ETHERNET_IDX]);
 	netif_set_default(&xnetif[ETHERNET_IDX]);
 	s_net_ready = 1;
-	VS_LOG("网络就绪：192.168.2.250/24（相机应为 192.168.2.231）");
+	VS_LOG("网络就绪：ECM 口 = 192.168.77.1/24（相机侧应为 192.168.77.2）");
+	VS_LOG("提示：WiFi 口若也拿到了 192.168.77.x 会与本链路冲突，请把路由器网段避开 77");
 
 	s_fd_mtx = xSemaphoreCreateMutex();
 
