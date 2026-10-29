@@ -73,6 +73,48 @@ extern struct netif xnetif[NET_IF_NUM];
 /* ------------------------------------------------------------------ 通用状态 */
 static volatile int s_net_ready = 0;
 
+/* ================================================================== 0) 打补丁的 lwIP 钩子
+ * bw21/tools/apply_patches.py 会在 etharp.c / ip4.c 里插入对这两个函数的调用
+ * （只在定义了 LI_THERMAL_GW 宏时编进去，本例程的 cmake 定义了它 ——
+ *   因为同一个补丁文件里还包含【必需】的 CDC-ECM 主机驱动 MAC 兜底修复：
+ *   Linux 的 f_ecm 不提供 iMACAddress 字符串描述符，没这个兜底就会
+ *   "[ECMH] Get MAC fail error[3]" 无限重试，ECM 永远起不来）。
+ * 所以这两个钩子必须提供，否则链接会报未定义符号。
+ *
+ * proxy_arp：ECM 口上，除【相机自己的地址】以外的单播 ARP 一律代答
+ *            （相机把整个 /24 当直连网段）。绝不能替相机自己的 IP 代答 ——
+ *            那会让相机的地址冲突检测(ACD)以为地址被占用而弃用该 IP。
+ * host_route：发往相机地址的包强制走 ECM 口（否则可能被先注册的 WiFi 口抢走）。
+ */
+#define VS_CAM_IP_HOST 0xC0A84D02u /* 192.168.77.2（相机侧） */
+
+int li_gw_proxy_arp(struct netif *netif, const ip4_addr_t *target)
+{
+	u32_t t = target->addr;
+
+	if (t == 0 || t == 0xFFFFFFFFu) {
+		return 0;
+	}
+	if (ip4_addr_ismulticast(target)) {
+		return 0;
+	}
+	if (netif != &xnetif[ETHERNET_IDX]) {
+		return 0; /* WiFi 口不代答（本固件不做网关） */
+	}
+	return (ntohl(t) != VS_CAM_IP_HOST) ? 1 : 0;
+}
+
+struct netif *li_gw_host_route(const ip4_addr_t *dest)
+{
+	if (!s_net_ready) {
+		return NULL;
+	}
+	if (ntohl(dest->addr) == VS_CAM_IP_HOST) {
+		return &xnetif[ETHERNET_IDX];
+	}
+	return NULL;
+}
+
 /* ================================================================== 1) USB Host + CDC-ECM
  * 整段从 li_thermal_gw / 官方 usbh_cdc_ecm_new 例程移植：回调 + lwIP 桥（契约同
  * ethernetif_mii_init：netif->linkoutput → rltk_mii_send；bulk_receive → ethernetif_mii_recv）

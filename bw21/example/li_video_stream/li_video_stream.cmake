@@ -33,7 +33,13 @@ set_source_files_properties(
 
 ### add flags ###
 # CONFIG_ETHERNET=1：让 LwIP_Init() 注册 xnetif[ETHERNET_IDX]（USB 网卡口）
+# LI_THERMAL_GW=1  ：启用 bw21/tools/apply_patches.py 打的补丁。
+#   本例程【必须】定义它 —— 那个补丁文件里除了网关用的代理 ARP/主机路由，
+#   还包含 CDC-ECM 主机驱动的 MAC 兜底修复：Linux 的 f_ecm 不提供 iMACAddress
+#   字符串描述符，没有兜底就会 "[ECMH] Get MAC fail error[3]" 无限重试、ECM 永远起不来。
+#   代价是要在例程里实现 li_gw_proxy_arp / li_gw_host_route 两个钩子（li_video_stream.c 里已实现）。
 list(
 	APPEND app_example_flags
 	CONFIG_ETHERNET=1
+	LI_THERMAL_GW=1
 )

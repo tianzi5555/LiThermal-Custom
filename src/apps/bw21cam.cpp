@@ -178,38 +178,76 @@ static void enable_ecm_gadget(void)
     read_small("/tmp/bw21_ecm.stat", st, sizeof(st));
     lios_log("bw21cam: gadget 配置结果 = %s", st);
 
-    // 等网卡出现（主机枚举要时间），最多 20 秒
+    // 等网卡出现并配 IP（最多 25 秒）。
+    // 识别方式：优先读 gadget 里我们写进去的 ifname；读不到就排除法扫描
+    // （排除 lo / usb0=热像模组 / wlan0）—— 之前用「有没有 device 符号链接」判断
+    // gadget 网卡不成立，会一直认不出来。
+    // 结果写 /tmp/bw21_ifname，网卡清单写 /tmp/bw21_iflist（屏幕上要显示，ECM 模式下没有 adb）。
+    run_sh("G=/sys/kernel/config/usb_gadget/g1; "
+           "ls /sys/class/net 2>/dev/null | tr '\\n' ',' > /tmp/bw21_iflist; "
+           "n=$(cat \"$G/functions/ecm.usb0/ifname\" 2>/dev/null); "
+           "if [ -n \"$n\" ] && [ -e \"/sys/class/net/$n\" ]; then :; else "
+           "  n=''; "
+           "  for i in $(ls /sys/class/net 2>/dev/null); do "
+           "    case \"$i\" in lo|usb0|wlan0|sit0|tunl0) continue ;; esac; "
+           "    n=\"$i\"; break; "
+           "  done; "
+           "fi; "
+           "if [ -n \"$n\" ]; then "
+           "  ifconfig \"$n\" " CAM_IP " netmask " CAM_MASK " up 2>/dev/null; "
+           "  echo \"$n\" > /tmp/bw21_ifname; "
+           "else "
+           "  echo '' > /tmp/bw21_ifname; "
+           "fi");
+
     char ifn[32] = "";
-    for (int i = 0; i < 20; i++)
+    char iflist[96] = "";
+    for (int i = 0; i < 25; i++)
     {
-        if (find_ecm_ifname(ifn, sizeof(ifn)) == 0)
+        read_small("/tmp/bw21_ifname", ifn, sizeof(ifn));
+        if (ifn[0] != 0)
             break;
+        // 还没出现：重新扫一遍（顺便刷新清单）
+        run_sh("G=/sys/kernel/config/usb_gadget/g1; "
+               "ls /sys/class/net 2>/dev/null | tr '\\n' ',' > /tmp/bw21_iflist; "
+               "n=''; "
+               "for i in $(ls /sys/class/net 2>/dev/null); do "
+               "  case \"$i\" in lo|usb0|wlan0|sit0|tunl0) continue ;; esac; "
+               "  n=\"$i\"; break; "
+               "done; "
+               "if [ -n \"$n\" ]; then "
+               "  ifconfig \"$n\" " CAM_IP " netmask " CAM_MASK " up 2>/dev/null; "
+               "  echo \"$n\" > /tmp/bw21_ifname; "
+               "else echo '' > /tmp/bw21_ifname; fi");
+        read_small("/tmp/bw21_ifname", ifn, sizeof(ifn));
+        if (ifn[0] != 0)
+            break;
+        read_small("/tmp/bw21_iflist", iflist, sizeof(iflist));
         pthread_mutex_lock(&s_mtx);
-        snprintf(s_status, sizeof(s_status), "等网卡出现… %d/20", i + 1);
+        snprintf(s_status, sizeof(s_status), "等网卡出现… %d/25", i + 1);
+        snprintf(s_detail, sizeof(s_detail), "现有网卡:%s", iflist[0] ? iflist : "?");
         pthread_mutex_unlock(&s_mtx);
         sleep(1);
     }
+    read_small("/tmp/bw21_iflist", iflist, sizeof(iflist));
 
     if (ifn[0] == 0)
     {
         pthread_mutex_lock(&s_mtx);
         snprintf(s_status, sizeof(s_status), "USB 网卡未启用");
-        snprintf(s_detail, sizeof(s_detail), "%s",
-                 strncmp(st, "ok", 2) == 0 ? "已绑定但网卡没出现:查线/VBUS"
-                                          : (st[0] ? st : "配置失败"));
+        if (strncmp(st, "ok", 2) != 0 && st[0] != 0)
+            snprintf(s_detail, sizeof(s_detail), "%s", st);
+        else
+            snprintf(s_detail, sizeof(s_detail), "无新网卡 现有:%s", iflist[0] ? iflist : "?");
         pthread_mutex_unlock(&s_mtx);
         return;
     }
 
-    char cmd[192];
-    snprintf(cmd, sizeof(cmd), "ifconfig %s " CAM_IP " netmask " CAM_MASK " up", ifn);
-    run_sh(cmd);
-
     pthread_mutex_lock(&s_mtx);
-    snprintf(s_status, sizeof(s_status), "网卡已就绪，连接中…");
+    snprintf(s_status, sizeof(s_status), "网卡 %s 就绪，连接中…", ifn);
     snprintf(s_detail, sizeof(s_detail), "%s = " CAM_IP, ifn);
     pthread_mutex_unlock(&s_mtx);
-    lios_log("bw21cam: ECM 网卡就绪 %s", ifn);
+    lios_log("bw21cam: ECM 网卡就绪 %s = " CAM_IP, ifn);
 }
 
 // 恢复 adb 模式（摘掉 ecm，挂回 ffs.adb + ffs.mtp；configfs 是内存态，重启也能复原）
