@@ -17,17 +17,19 @@
 #include "my_main.h"
 
 #include <arpa/inet.h>
+#include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <unistd.h>
-#include <dirent.h>
 
 #include <libavcodec/avcodec.h>
 #include <libswscale/swscale.h>
@@ -132,6 +134,8 @@ static void read_small(const char *path, char *out, size_t n)
     while (l > 0 && (out[l - 1] == '\n' || out[l - 1] == '\r' || out[l - 1] == ' '))
         out[--l] = 0;
 }
+
+static void link_diag(void); // 前向声明：enable_ecm_gadget 里要用，定义在后面
 
 // 启用 ECM gadget —— 完全照搬在这台相机上验证过的 usbnet_boot.sh 顺序：
 //   等 gadget 就绪 → 解绑 → sleep 1 → 摘 MTP + ADB（T113 的 UDC 端点很少，
@@ -243,11 +247,17 @@ static void enable_ecm_gadget(void)
         return;
     }
 
+    // 配好立刻做一次链路诊断（ifconfig 真实状态 + ping BW21），
+    // 不等 connect —— 否则用户只能看到"连接中"，不知道链路到底通不通。
+    link_diag();
+    char diag[96];
+    read_small("/tmp/bw21_diag.txt", diag, sizeof(diag));
+
     pthread_mutex_lock(&s_mtx);
     snprintf(s_status, sizeof(s_status), "网卡 %s 就绪，连接中…", ifn);
-    snprintf(s_detail, sizeof(s_detail), "%s = " CAM_IP, ifn);
+    snprintf(s_detail, sizeof(s_detail), "%s", diag[0] ? diag : (ifn));
     pthread_mutex_unlock(&s_mtx);
-    lios_log("bw21cam: ECM 网卡就绪 %s = " CAM_IP, ifn);
+    lios_log("bw21cam: ECM 网卡就绪 %s = " CAM_IP " 诊断: %s", ifn, diag);
 }
 
 // 恢复 adb 模式（摘掉 ecm，挂回 ffs.adb + ffs.mtp；configfs 是内存态，重启也能复原）
@@ -301,6 +311,50 @@ static void link_diag(void)
 }
 
 // ---------------------------------------------------------------- 收流 + 解码
+
+// 带超时的 connect：SO_RCVTIMEO 管不到 connect()，对端不应答 ARP 时
+// 阻塞式 connect 会按内核默认 SYN 重试卡住约 2 分钟 —— 所以用非阻塞 + select。
+static bool connect_with_timeout(int fd, const struct sockaddr *sa, socklen_t len, int timeout_ms)
+{
+    int fl = fcntl(fd, F_GETFL, 0);
+    if (fl < 0)
+        fl = 0;
+    fcntl(fd, F_SETFL, fl | O_NONBLOCK);
+
+    int r = connect(fd, sa, len);
+    if (r == 0)
+    {
+        fcntl(fd, F_SETFL, fl);
+        return true;
+    }
+    if (errno != EINPROGRESS)
+    {
+        fcntl(fd, F_SETFL, fl);
+        return false;
+    }
+
+    fd_set wfds, efds;
+    FD_ZERO(&wfds);
+    FD_SET(fd, &wfds);
+    FD_ZERO(&efds);
+    FD_SET(fd, &efds);
+    struct timeval tv;
+    tv.tv_sec = timeout_ms / 1000;
+    tv.tv_usec = (timeout_ms % 1000) * 1000;
+
+    int sel = select(fd + 1, NULL, &wfds, &efds, &tv);
+    bool ok = false;
+    if (sel > 0 && FD_ISSET(fd, &wfds) && !FD_ISSET(fd, &efds))
+    {
+        int err = 0;
+        socklen_t el = sizeof(err);
+        getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &el);
+        ok = (err == 0);
+    }
+    fcntl(fd, F_SETFL, fl); // 恢复阻塞模式，后面 recv 要用 SO_RCVTIMEO
+    return ok;
+}
+
 static bool read_all(int fd, uint8_t *buf, size_t n)
 {
     size_t got = 0;
@@ -366,7 +420,7 @@ static void stream_loop(void)
         snprintf(s_status, sizeof(s_status), "连接 BW21 %s:%d …", BW21_IP, BW21_PORT);
         pthread_mutex_unlock(&s_mtx);
 
-        if (connect(fd, (struct sockaddr *)&sa, sizeof(sa)) != 0)
+        if (!connect_with_timeout(fd, (struct sockaddr *)&sa, sizeof(sa), 4000))
         {
             close(fd);
             fail_cnt++;
